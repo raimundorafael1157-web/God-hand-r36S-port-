@@ -367,6 +367,7 @@ void main()
             {
                 target.drawnOnGpu = false;
                 target.vramValid = true;
+                ++m_stateEpoch;
             }
     }
 
@@ -408,6 +409,7 @@ void main()
             }
         BumpPages(t.fbp, PagesOf(t.fbw, t.rows));
         t.vramValid = true;
+        ++m_stateEpoch;
         ++m_stats.readbacks;
     }
 
@@ -449,6 +451,7 @@ void main()
             }
         BumpPages(d.zbp, PagesOf(d.fbw, d.rows, d.psm));
         d.gpuNewer = false;
+        ++m_stateEpoch;
         ++m_stats.readbacks;
     }
 
@@ -470,6 +473,7 @@ void main()
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, static_cast<GLsizei>(w), static_cast<GLsizei>(h), GL_RGBA, GL_UNSIGNED_BYTE, px.data());
         m_haveApplied = false;
         t.drawnOnGpu = true;
+        ++m_stateEpoch;
         ++m_stats.targetUploads;
     }
 
@@ -544,6 +548,7 @@ void main()
         Target &t = m_targets[fbp];
         if (!t.colorTexture)
         {
+            ++m_stateEpoch;
             t.fbp = fbp;
             t.fbw = fbw;
             t.width = kTargetWidth;
@@ -563,6 +568,7 @@ void main()
                 ReadbackTarget(t);
             t.fbw = fbw;
             t.drawnOnGpu = false;
+            ++m_stateEpoch;
         }
         return t;
     }
@@ -572,6 +578,7 @@ void main()
         Depth &d = m_depths[zbp];
         if (!d.texture)
         {
+            ++m_stateEpoch;
             d.zbp = zbp;
             glGenTextures(1, &d.texture);
             m_texParams.erase(d.texture);
@@ -670,6 +677,49 @@ void main()
     }
 
     uint32_t GSGlesBackend::TextureFor(const GSDrawState &state)
+    {
+        // The same texture registers as the last call, with no VRAM page written and no frame buffer changed since:
+        // the answer is the same (most primitives of a batch share their texture).
+        LookupKey lk;
+        std::memset(&lk, 0, sizeof(lk));
+        const GSTex0Reg &t0 = state.context.tex0;
+        lk.tbp0 = t0.tbp0;
+        lk.cbp = t0.cbp;
+        lk.tbw = t0.tbw;
+        lk.psm = t0.psm;
+        lk.tw = t0.tw;
+        lk.th = t0.th;
+        lk.tcc = t0.tcc;
+        lk.tfx = t0.tfx;
+        lk.cpsm = t0.cpsm;
+        lk.csm = t0.csm;
+        lk.csa = t0.csa;
+        lk.cld = t0.cld;
+        lk.ta0 = state.texa.ta0;
+        lk.aem = state.texa.aem ? 1u : 0u;
+        lk.ta1 = state.texa.ta1;
+        lk.width = state.textureWidth;
+        lk.height = state.textureHeight;
+        lk.clutHash = m_clutHash;
+        lk.epoch = m_stateEpoch;
+        lk.gen = m_genCounter;
+        if (m_haveLastLookup && std::memcmp(&lk, &m_lastLookup, sizeof(lk)) == 0)
+        {
+            m_texturePal = m_lastLookupPal;
+            return m_lastLookupTexture;
+        }
+        const uint32_t result = TextureLookup(state);
+        // Store against the state after the lookup: what it did itself (copies, decodes) is part of the answer.
+        lk.epoch = m_stateEpoch;
+        lk.gen = m_genCounter;
+        m_lastLookup = lk;
+        m_haveLastLookup = true;
+        m_lastLookupTexture = result;
+        m_lastLookupPal = m_texturePal;
+        return result;
+    }
+
+    uint32_t GSGlesBackend::TextureLookup(const GSDrawState &state)
     {
         ++m_stats.textureLookups;
         const GSTex0Reg &tex0 = state.context.tex0;
@@ -787,7 +837,12 @@ void main()
         }
         {
             Target &t = TargetFor(cx.frame.fbp, cx.frame.fbw);
-            t.rows = std::max<uint32_t>(t.rows, std::min<uint32_t>(kTargetHeight, cx.scissor.y1 + 1u));
+            const uint32_t rows = std::max<uint32_t>(t.rows, std::min<uint32_t>(kTargetHeight, cx.scissor.y1 + 1u));
+            if (rows != t.rows)
+            {
+                t.rows = rows;
+                ++m_stateEpoch;
+            }
         }
 
         DrawKey key;
@@ -805,9 +860,14 @@ void main()
         if (key.zte)
         {
             Depth &d = DepthFor(cx.zbuf.zbp);
-            d.fbw = cx.frame.fbw;
-            d.psm = cx.zbuf.psm;
-            d.rows = std::max<uint32_t>(d.rows, std::min<uint32_t>(kTargetHeight, cx.scissor.y1 + 1u));
+            const uint32_t rows = std::max<uint32_t>(d.rows, std::min<uint32_t>(kTargetHeight, cx.scissor.y1 + 1u));
+            if (d.fbw != cx.frame.fbw || d.psm != cx.zbuf.psm || d.rows != rows)
+            {
+                d.fbw = cx.frame.fbw;
+                d.psm = cx.zbuf.psm;
+                d.rows = rows;
+                ++m_stateEpoch;
+            }
         }
         key.scissor[0] = cx.scissor.x0;
         key.scissor[1] = cx.scissor.x1;
@@ -998,11 +1058,13 @@ void main()
                 {
                     t.drawnOnGpu = false; // the VRAM image is the picture now
                     t.vramValid = true;
+                    ++m_stateEpoch;
                 }
             Target &t = TargetFor(cx.frame.fbp, cx.frame.fbw);
             t.rows = std::max(t.rows, rows);
             t.drawnOnGpu = false;
             t.vramValid = true;
+            ++m_stateEpoch;
         }
         if (zte && !cx.zbuf.zmask)
         {
@@ -1236,11 +1298,18 @@ void main()
         if (m_key.colorMask)
         {
             Target &t = m_targets[m_key.fbp];
+            if (!t.drawnOnGpu || t.vramValid)
+                ++m_stateEpoch;
             t.drawnOnGpu = true;
             t.vramValid = false;
         }
         if (m_key.zte && !m_key.zmsk)
-            m_depths[m_key.zbp].gpuNewer = true;
+        {
+            Depth &d = m_depths[m_key.zbp];
+            if (!d.gpuNewer)
+                ++m_stateEpoch;
+            d.gpuNewer = true;
+        }
         m_vertices.clear();
     }
 
@@ -1250,6 +1319,7 @@ void main()
         FlushBatch();
         Target &target = TargetFor(context.frame.fbp, context.frame.fbw);
         target.rows = std::max<uint32_t>(target.rows, std::min<uint32_t>(kTargetHeight, context.scissor.y1 + 1u));
+        ++m_stateEpoch;
         if (!target.drawnOnGpu)
             UploadTarget(target);
         const uint32_t fb = FramebufferFor(target, 0u);
@@ -1265,6 +1335,7 @@ void main()
         glClear(GL_COLOR_BUFFER_BIT);
         target.drawnOnGpu = true;
         target.vramValid = false;
+        ++m_stateEpoch;
         ++m_stats.clears;
         return true;
     }

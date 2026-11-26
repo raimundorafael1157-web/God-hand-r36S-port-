@@ -150,7 +150,8 @@ namespace gles
             return std::max(1u, fbw) * ((std::max(1u, rows) + pageRows - 1u) / pageRows);
         }
         uint32_t FramebufferFor(Target &target, uint32_t depth);
-        uint32_t TextureFor(const GSDrawState &state);
+        uint32_t TextureFor(const GSDrawState &state);    // TextureLookup, skipped while nothing it reads changed
+        uint32_t TextureLookup(const GSDrawState &state);
         void Decode(const GSTex0Reg &tex0, const GSTexaReg &texa, uint32_t w, uint32_t h, std::vector<uint32_t> &out) const;
         void PageRange(uint32_t bp, uint32_t bw, uint32_t psm, uint32_t w, uint32_t h, uint32_t &first, uint32_t &count) const;
         uint32_t PageGeneration(uint32_t first, uint32_t count) const;
@@ -210,5 +211,22 @@ namespace gles
         uint32_t m_boundFramebuffer = ~0u;
         FrameStats m_stats{};
         uint32_t m_frameIndex = 0;
+        // Bumped whenever a frame buffer or depth buffer changes in a way TextureFor looks at (created, re-laid out,
+        // drawn on the GPU or the CPU, copied either way, rows grown). With the VRAM page generation, it tells
+        // whether TextureFor's last answer still holds for the same texture registers.
+        uint64_t m_stateEpoch = 1;
+        struct LookupKey
+        {
+            uint32_t tbp0, cbp;
+            uint8_t tbw, psm, tw, th, tcc, tfx, cpsm, csm, csa, cld;
+            uint8_t ta0, aem, ta1, pad[3];
+            uint32_t width, height;
+            uint64_t clutHash, epoch;
+            uint32_t gen, pad2;
+        };
+        LookupKey m_lastLookup{};
+        bool m_haveLastLookup = false;
+        uint32_t m_lastLookupTexture = 0;
+        bool m_lastLookupPal = false;
     };
 }
