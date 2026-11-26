@@ -1,0 +1,190 @@
+diff --git a/renderer/gles/gs_gles_backend.cpp b/renderer/gles/gs_gles_backend.cpp
+index 6f60a24..53ec178 100644
+--- a/renderer/gles/gs_gles_backend.cpp
++++ b/renderer/gles/gs_gles_backend.cpp
+@@ -42,7 +42,10 @@ void main()
+ )";
+ 
+         // Colours are stored as bytes (x/255); alpha as GS alpha with 0x80 = 1.0, so GL blending with SRC/DST alpha
+-        // matches the GS. A texture decoded from VRAM keeps raw alpha (a/255): uTexAlpha rescales it.
++        // matches the GS. Frame buffers keep the alpha BYTE (a/255), as VRAM does: PS2 effects put other data there
++        // (God Hand's depth of field: a byte of the depth, then a palette index up to 0xF8), so it must survive.
++        // When blending weighs by the source alpha, the shader outputs the weight (uAlphaWeight = 1) and the alpha
++        // channel's own blend (CONSTANT_ALPHA = 128/255, ZERO) turns it back into the byte; otherwise the byte.
+         const char *kFragmentShader = R"(#version 300 es
+ precision highp float;
+ in vec4 vColor;
+@@ -52,7 +55,7 @@ uniform sampler2D uTex;
+ uniform sampler2D uClut;
+ uniform int uPal;
+ uniform vec2 uTexScale;
+-uniform float uTexAlpha;
++uniform int uAlphaWeight;
+ uniform int uTme;
+ uniform int uTfx;
+ uniform int uTcc;
+@@ -73,14 +76,14 @@ void main()
+         {
+             // T8H on a frame buffer: the pixel's alpha byte indexes the CLUT.
+             float ta = texture(uTex, vStq.xy / vStq.z * uTexScale).a;
+-            int idx = int(clamp(floor(ta * 128.0 + 0.5), 0.0, 255.0));
++            int idx = int(clamp(floor(ta * 255.0 + 0.5), 0.0, 255.0));
+             t = texelFetch(uClut, ivec2(idx, 0), 0);
+             t.a *= 255.0 / 128.0;
+         }
+         else
+         {
+             t = texture(uTex, vStq.xy / vStq.z * uTexScale);
+-            t.a *= uTexAlpha;
++            t.a *= 255.0 / 128.0;
+         }
+         if (uTfx == 0)      { rgb = rgb * t.rgb * (255.0 / 128.0); a = uTcc == 1 ? a * t.a : a; }
+         else if (uTfx == 1) { rgb = t.rgb; a = uTcc == 1 ? t.a : a; }
+@@ -102,7 +105,7 @@ void main()
+     }
+     if (uFge == 1)
+         rgb = mix(uFog, rgb, vFog);
+-    oColor = clamp(vec4(rgb, a), 0.0, 1.0);
++    oColor = vec4(clamp(rgb, 0.0, 1.0), uAlphaWeight == 1 ? clamp(a, 0.0, 1.0) : clamp(a * (128.0 / 255.0), 0.0, 1.0));
+ }
+ )";
+ 
+@@ -308,7 +311,7 @@ void main()
+         m_uAref = glGetUniformLocation(m_program, "uAref");
+         m_uTexScale = glGetUniformLocation(m_program, "uTexScale");
+         m_uPal = glGetUniformLocation(m_program, "uPal");
+-        m_uTexAlpha = glGetUniformLocation(m_program, "uTexAlpha");
++        m_uAlphaWeight = glGetUniformLocation(m_program, "uAlphaWeight");
+         glUniform1i(glGetUniformLocation(m_program, "uClut"), 1);
+         glGenTextures(1, &m_clutTexture);
+         glActiveTexture(GL_TEXTURE1);
+@@ -423,7 +426,7 @@ void main()
+             for (uint32_t x = 0; x < w; ++x)
+             {
+                 const uint32_t c = px[static_cast<size_t>(y) * w + x];
+-                const uint32_t a = ((c >> 24) * 128u + 127u) / 255u; // stored with 0x80 = 1.0
++                const uint32_t a = c >> 24; // the alpha byte, as VRAM keeps it
+                 m_cpu.WriteVram(GS_PSM_CT32, t.fbp * 32u, t.fbw, x, y, (c & 0xFFFFFFu) | (a << 24));
+             }
+         BumpPages(t.fbp, PagesOf(t.fbw, t.rows));
+@@ -485,7 +488,7 @@ void main()
+             for (uint32_t x = 0; x < w; ++x)
+             {
+                 const uint32_t c = m_cpu.ReadVram(GS_PSM_CT32, t.fbp * 32u, t.fbw, x, y);
+-                const uint32_t a = std::min(255u, ((c >> 24) * 255u + 64u) / 128u);
++                const uint32_t a = c >> 24;
+                 px[static_cast<size_t>(y) * w + x] = (c & 0xFFFFFFu) | (a << 24);
+             }
+         glBindTexture(GL_TEXTURE_2D, t.colorTexture);
+@@ -1026,6 +1029,10 @@ void main()
+             return true;
+         if ((cx.test >> 14) & 1u)
+             return true;
++        // Blend weighed by the destination alpha: GL would read the byte as a/255, the GS as a/128. Exact on the CPU.
++        // (God Hand's stage 1 fight never does this.)
++        if (st.prim.abe && ((cx.alpha >> 4) & 3u) == 1u && (cx.alpha & 3u) != ((cx.alpha >> 2) & 3u))
++            return true;
+         if (!st.prim.tme)
+             return false;
+         const GSTex0Reg &tex0 = cx.tex0;
+@@ -1144,6 +1151,7 @@ void main()
+         }
+ 
+         const int blend = (k.abe && !debugFlag('b')) ? 1 : 0;
++        int alphaWeight = 0;
+         if (blend != m_gl.blend)
+         {
+             ++m_stats.glStateCalls;
+@@ -1158,15 +1166,6 @@ void main()
+             const uint8_t A = k.blend[0], B = k.blend[1], C = k.blend[2], D = k.blend[3];
+             const GLenum factor = C == 0u ? GL_SRC_ALPHA : (C == 1u ? GL_DST_ALPHA : GL_CONSTANT_ALPHA);
+             const GLenum oneMinus = C == 0u ? GL_ONE_MINUS_SRC_ALPHA : (C == 1u ? GL_ONE_MINUS_DST_ALPHA : GL_ONE_MINUS_CONSTANT_ALPHA);
+-            if (C == 2u)
+-            {
+-                const float alpha = std::min(1.0f, static_cast<float>(k.fix) / 128.0f);
+-                if (alpha != m_gl.blendAlpha)
+-                {
+-                    ++m_stats.glStateCalls; glBlendColor(0.0f, 0.0f, 0.0f, alpha);
+-                    m_gl.blendAlpha = alpha;
+-                }
+-            }
+             GLenum src = GL_SRC_ALPHA, dst = GL_ONE_MINUS_SRC_ALPHA, eq = GL_FUNC_ADD;
+             if (A == B)
+             {
+@@ -1179,16 +1178,30 @@ void main()
+             else if (A == 2u && B == 0u && D == 1u) { src = factor; dst = GL_ONE; eq = GL_FUNC_REVERSE_SUBTRACT; } // Cd-Cs*C
+             else if (A == 1u && B == 0u && D == 0u) { src = oneMinus; dst = factor; }     // (Cd-Cs)*C+Cs
+             else if (A == 1u && B == 2u && D == 0u) { src = GL_ONE; dst = factor; }       // Cd*C+Cs
++            // The GS writes the source alpha as it is, never blended: the alpha channel gets its own blend. When the
++            // colour blend weighs by the source alpha, the shader outputs that weight (alpha/128) and CONSTANT_ALPHA
++            // = 128/255 turns it back into the byte; FIX (C = 2) takes the constant itself, and the shader then
++            // outputs the byte directly.
++            const bool weight = C == 0u && A != B;
++            alphaWeight = weight ? 1 : 0;
++            const float constant = C == 2u ? std::min(1.0f, static_cast<float>(k.fix) / 128.0f) : 128.0f / 255.0f;
++            if ((C == 2u || weight) && constant != m_gl.blendAlpha)
++            {
++                ++m_stats.glStateCalls; glBlendColor(0.0f, 0.0f, 0.0f, constant);
++                m_gl.blendAlpha = constant;
++            }
++            const GLenum alphaSrc = weight ? GL_CONSTANT_ALPHA : GL_ONE;
+             if (eq != m_gl.blendEq)
+             {
+-                ++m_stats.glStateCalls; glBlendEquation(eq);
++                ++m_stats.glStateCalls; glBlendEquationSeparate(eq, GL_FUNC_ADD);
+                 m_gl.blendEq = eq;
+             }
+-            if (src != m_gl.blendSrc || dst != m_gl.blendDst)
++            if (src != m_gl.blendSrc || dst != m_gl.blendDst || alphaSrc != m_gl.blendAlphaSrc)
+             {
+-                ++m_stats.glStateCalls; glBlendFunc(src, dst);
++                ++m_stats.glStateCalls; glBlendFuncSeparate(src, dst, alphaSrc, GL_ZERO);
+                 m_gl.blendSrc = src;
+                 m_gl.blendDst = dst;
++                m_gl.blendAlphaSrc = alphaSrc;
+             }
+         }
+         if (k.colorMask != m_gl.colorMask)
+@@ -1266,8 +1279,8 @@ void main()
+                 ++m_stats.glStateCalls; glUniform2f(m_uTexScale, scale[0], scale[1]);
+                 std::memcpy(m_gl.texScale, scale, sizeof(scale));
+             }
+-            uniformFloat(m_uTexAlpha, m_gl.texAlpha, fromTarget ? 1.0f : 255.0f / 128.0f);
+         }
++        uniformInt(m_uAlphaWeight, m_gl.alphaWeight, alphaWeight);
+     }
+ 
+     void GSGlesBackend::FlushBatch()
+@@ -1350,7 +1363,7 @@ void main()
+                   context.scissor.y1 - context.scissor.y0 + 1);
+         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+         glClearColor((rgba & 0xFFu) / 255.0f, ((rgba >> 8) & 0xFFu) / 255.0f, ((rgba >> 16) & 0xFFu) / 255.0f,
+-                     std::min(1.0f, ((rgba >> 24) & 0xFFu) / 128.0f));
++                     ((rgba >> 24) & 0xFFu) / 255.0f);
+         glClear(GL_COLOR_BUFFER_BIT);
+         target.drawnOnGpu = true;
+         target.vramValid = false;
+diff --git a/renderer/gles/gs_gles_backend.h b/renderer/gles/gs_gles_backend.h
+index 2f79318..6469848 100644
+--- a/renderer/gles/gs_gles_backend.h
++++ b/renderer/gles/gs_gles_backend.h
+@@ -165,7 +165,7 @@ namespace gles
+ 
+         uint32_t m_program = 0, m_vbo = 0, m_vao = 0;
+         uint32_t m_depthProgram = 0, m_emptyVao = 0, m_scratchTexture = 0, m_scratchFramebuffer = 0;
+-        int m_uDepthScale = -1, m_uDepthMax = -1, m_uTexAlpha = -1;
++        int m_uDepthScale = -1, m_uDepthMax = -1, m_uAlphaWeight = -1;
+         int m_uTarget = -1, m_uTfx = -1, m_uTcc = -1, m_uTme = -1, m_uFge = -1, m_uFog = -1, m_uAte = -1,
+             m_uAtst = -1, m_uAref = -1, m_uTexScale = -1, m_uTex = -1, m_uPal = -1;
+         uint32_t m_clutTexture = 0, m_clutTextureTag = 0;  // 256x1 RGBA CLUT for T8H-on-target draws
+@@ -197,7 +197,9 @@ namespace gles
+             float blendAlpha = -1.0f;
+             int scissor[4] = {-1, -1, -1, -1};
+             int tme = -1, pal = -1, tfx = -1, tcc = -1, fge = -1, ate = -1, atst = -1;
+-            float fog[3] = {-1.0f, -1.0f, -1.0f}, aref = -1.0f, texScale[2] = {-1.0f, -1.0f}, texAlpha = -1.0f;
++            float fog[3] = {-1.0f, -1.0f, -1.0f}, aref = -1.0f, texScale[2] = {-1.0f, -1.0f};
++            int alphaWeight = -1;
++            GLenum blendAlphaSrc = 0;
+             uint32_t boundTexture = ~0u;
+         } m_gl;
+         struct TexParams
