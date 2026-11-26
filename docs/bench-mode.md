@@ -25,6 +25,7 @@ O repositório original fica intacto. `scripts/setup_base.sh` clona LasVola/godh
 | `0002-arm64-drm.patch` | raylib em KMS/DRM (sem X11/GLFW): define `PLATFORM_DRM`, controles GLFW desligados nesse modo |
 | `0003-bench-mode.patch` | `PS2X_BENCH=1` (sem janela, GPU e áudio; linha `[bench]` por segundo), `PS2X_GS_NULL=1` (GS descarta primitivas), save state em hora marcada |
 | `0004-r36s-resolution.patch` | resolução interna padrão 1x (512x448, abaixo da tela 640x480 do R36S) e travada em 1x, mesmo com `godhand.ini` antigo; `GODHAND_ALLOW_HIRES=1` libera |
+| `0009-bench-profiling.patch` | instrumentação: tempo da GameThread por subsistema, sensores de clock/temperatura/GPU/memória, afinidade opcional, resumo térmico (seção abaixo) |
 | `platform/arm64-intrin` | cabeçalhos SSE do x86 redirecionados para sse2neon (MIT, v1.8.0, sha256 conferido) |
 
 ## O que a linha `[bench]` mostra
@@ -44,6 +45,63 @@ Exemplo do formato (números ilustrativos, não medidos):
 - `rss`: memória residente em MB.
 
 No fim sai uma linha `[bench-summary]` com médias, percentil 5 e pior caso, sem os primeiros 20 s (boot).
+
+## Instrumentação (patch 0009)
+
+Nada aqui muda o que o emulador executa. Tudo fica desligado por padrão: o comando simples mede exatamente o que
+media antes.
+
+| Opção | O que faz |
+| --- | --- |
+| `PS2X_PROF=1` | Divide o tempo da GameThread por subsistema: `ee`, `vu1`, `vu0`, `iop`, `dispatch`, `sched`, `gif`, `vif`, `idle` (folga: nada a fazer ou adiantado em relação ao tempo real), `gs-wait` (esperando a thread do GS) |
+| `PS2X_PIN=auto` | Fixa GameThread, IOPThread e GSThread nos núcleos 3, 2 e 1 (ou `PS2X_PIN=GameThread:3,IOPThread:2,...`) |
+| `PS2X_GAME_NICE=-5` | Prioridade maior para a GameThread (precisa de root) |
+| 900 s no `run_bench.sh` | Rodada longa; `[bench-thermal]` compara o primeiro e o último minuto |
+
+**Como mede.** Cada ponto de entrada de subsistema troca a "seção atual" da GameThread lendo o contador do
+processador (`CNTVCT_EL0` no ARM64, 24 MHz no RK3326; TSC no PC). O tempo é exclusivo: um microprograma VU1
+chamado de dentro do código do EE conta como `vu1`, não `ee`, e as seções somam o tempo de parede da thread.
+
+O despacho e o agendador são chamados ~10 milhões de vezes por segundo. Cronometrar todas as chamadas custava ~45% da
+thread no PC, então elas são **amostradas**:
+- todas as chamadas são contadas;
+- 1 em 128, sorteada pseudoaleatoriamente, é cronometrada, e o total é extrapolado;
+- o custo de uma leitura do contador (medido no início) é descontado de cada trecho cronometrado;
+- seções exatas que ocorrem dentro delas (por exemplo, a espera de ritmo dentro do checkpoint) pausam o cronômetro.
+
+O caminho rápido dos checkpoints (o laço apertado) não é marcado e fica em `ee`.
+
+**Linhas novas no log** (os campos antigos da linha `[bench]` não mudaram de lugar; o novo vai no fim):
+
+```
+[bench-sensors] cpu clocks: 4 cores | cpu max: ok | thermal: soc-thermal gpu-thermal | devfreq: ff400000.gpu (load) dmc (no load)
+[bench] ... | GameThread=99% IOPThread=60% | clocks: cpu=1296 max=1296 temps=soc-thermal:52,gpu-thermal:50 ff400000.gpu=400/37% dmc=786 | game: ee=31% vu1=26% ...
+[bench-sections] GameThread wall time: ee=... | switches/s=... x ... ns + sampled markers/s=... x ... ns -> overhead ~...% | counter read bias ... ticks
+[bench-thermal] first 60 s: speed=..% temp=..C | last 60 s: speed=..% temp=..C | temp max=..C | cpu cap min=.. MHz | gpu clock min=.. MHz
+```
+
+(exemplo de formato; os nomes dos sensores dependem do kernel). O que o kernel não expõe sai como `unavailable` no
+`[bench-sensors]` e `n/a` por segundo, e o teste continua.
+
+**Verificação no PC (Xeon 2,1 GHz, luta da fase 1, 3 rodadas de 60 s por variante):**
+
+| Variante | Velocidade média | CPU da GameThread |
+| --- | --- | --- |
+| Base, sem os marcadores | 98,7% | 61,9% (56–68) |
+| Instrumentada, desligada | 98,7% | 65,6% (64–67) |
+| Instrumentada, `PS2X_PROF=1` | 97,3% | 70,2% (68–72) |
+
+- **Desligada:** um marcador custa +0,02 ns (despacho) e +0,29 ns (seção exata), medido isoladamente. Com ~10
+  milhões por segundo, isso é <0,05%. A diferença na tabela é ruído da VM.
+- **Ligada:** custa ~6–8% da GameThread pela estimativa do próprio bench, e até ~13% na CPU medida acima. O
+  `[bench-sections]` de cada rodada informa a estimativa medida no próprio aparelho. A medida de velocidade que
+  decide é a rodada sem `PS2X_PROF`.
+- **Fidelidade:** o fluxo de comandos do GS e os hashes da VRAM de 60 fields da luta saíram idênticos byte a byte
+  (323.613.961 bytes, mesmo SHA-256) em duas rodadas da base, uma desligada e uma ligada.
+- **Divisão medida no PC com `PS2X_PROF=1`:** ee 23–27%, vu1 23–24%, dispatch 11–13%, sched ~4%, gif ~4%, vif ~2%,
+  iop ~1%, idle 26–31% (folga, porque no PC o jogo sobra).
+- O teste `tests/bench_loop_test.cpp` confere a contabilidade: 25% simulados em vu1 saem 25,0%, e ~13% simulados em
+  despacho amostrado saem 13–14%. Passa em x86-64 e em ARM64 (qemu, `CNTVCT_EL0`).
 
 ## Limites conhecidos
 
