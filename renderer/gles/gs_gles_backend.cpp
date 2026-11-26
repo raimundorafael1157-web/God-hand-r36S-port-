@@ -549,6 +549,7 @@ void main()
             t.width = kTargetWidth;
             t.height = kTargetHeight;
             glGenTextures(1, &t.colorTexture);
+            m_texParams.erase(t.colorTexture);
             glBindTexture(GL_TEXTURE_2D, t.colorTexture);
             glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, kTargetWidth, kTargetHeight);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -573,6 +574,7 @@ void main()
         {
             d.zbp = zbp;
             glGenTextures(1, &d.texture);
+            m_texParams.erase(d.texture);
             glBindTexture(GL_TEXTURE_2D, d.texture);
             glTexStorage2D(GL_TEXTURE_2D, 1, GL_DEPTH_COMPONENT24, kTargetWidth, kTargetHeight);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -723,8 +725,12 @@ void main()
         if (!t.id || t.width != w || t.height != h)
         {
             if (t.id)
+            {
+                m_texParams.erase(t.id);
                 glDeleteTextures(1, &t.id);
+            }
             glGenTextures(1, &t.id);
+            m_texParams.erase(t.id);
             glBindTexture(GL_TEXTURE_2D, t.id);
             glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, w, h);
             t.width = w;
@@ -1005,9 +1011,11 @@ void main()
         }
     }
 
-    void GSGlesBackend::ApplyKey(const DrawKey &k)
+    void GSGlesBackend::ApplyKey(const DrawKey &k, bool full)
     {
         ++m_stats.keyApplies;
+        if (full)
+            m_gl = GlStateCache{}; // something else touched GL: set everything again
         Target &target = TargetFor(k.fbp, k.fbw);
         if (!target.drawnOnGpu)
             UploadTarget(target);
@@ -1020,29 +1028,64 @@ void main()
             m_boundFramebuffer = fb;
             ++m_stats.targetSwitches;
         }
-        ++m_stats.glStateCalls; glScissor(k.scissor[0], k.scissor[2], k.scissor[1] - k.scissor[0] + 1, k.scissor[3] - k.scissor[2] + 1);
-
-        if (k.zte && !debugFlag('d'))
+        const int sc[4] = {k.scissor[0], k.scissor[2], k.scissor[1] - k.scissor[0] + 1, k.scissor[3] - k.scissor[2] + 1};
+        if (std::memcmp(sc, m_gl.scissor, sizeof(sc)) != 0)
         {
-            ++m_stats.glStateCalls; glEnable(GL_DEPTH_TEST);
-            static const GLenum funcs[4] = {GL_NEVER, GL_ALWAYS, GL_GEQUAL, GL_GREATER};
-            ++m_stats.glStateCalls; glDepthFunc(funcs[k.ztst & 3u]);
-            ++m_stats.glStateCalls; glDepthMask(k.zmsk ? GL_FALSE : GL_TRUE);
+            ++m_stats.glStateCalls; glScissor(sc[0], sc[1], sc[2], sc[3]);
+            std::memcpy(m_gl.scissor, sc, sizeof(sc));
         }
-        else
+
+        const int depthTest = (k.zte && !debugFlag('d')) ? 1 : 0;
+        if (depthTest != m_gl.depthTest)
         {
             ++m_stats.glStateCalls;
-            glDisable(GL_DEPTH_TEST);
+            if (depthTest)
+                glEnable(GL_DEPTH_TEST);
+            else
+                glDisable(GL_DEPTH_TEST);
+            m_gl.depthTest = depthTest;
+        }
+        if (depthTest)
+        {
+            static const GLenum funcs[4] = {GL_NEVER, GL_ALWAYS, GL_GEQUAL, GL_GREATER};
+            const GLenum func = funcs[k.ztst & 3u];
+            if (func != m_gl.depthFunc)
+            {
+                ++m_stats.glStateCalls; glDepthFunc(func);
+                m_gl.depthFunc = func;
+            }
+            const int mask = k.zmsk ? 0 : 1;
+            if (mask != m_gl.depthMask)
+            {
+                ++m_stats.glStateCalls; glDepthMask(mask ? GL_TRUE : GL_FALSE);
+                m_gl.depthMask = mask;
+            }
         }
 
-        if (k.abe && !debugFlag('b'))
+        const int blend = (k.abe && !debugFlag('b')) ? 1 : 0;
+        if (blend != m_gl.blend)
         {
-            ++m_stats.glStateCalls; glEnable(GL_BLEND);
+            ++m_stats.glStateCalls;
+            if (blend)
+                glEnable(GL_BLEND);
+            else
+                glDisable(GL_BLEND);
+            m_gl.blend = blend;
+        }
+        if (blend)
+        {
             const uint8_t A = k.blend[0], B = k.blend[1], C = k.blend[2], D = k.blend[3];
             const GLenum factor = C == 0u ? GL_SRC_ALPHA : (C == 1u ? GL_DST_ALPHA : GL_CONSTANT_ALPHA);
             const GLenum oneMinus = C == 0u ? GL_ONE_MINUS_SRC_ALPHA : (C == 1u ? GL_ONE_MINUS_DST_ALPHA : GL_ONE_MINUS_CONSTANT_ALPHA);
             if (C == 2u)
-                ++m_stats.glStateCalls, glBlendColor(0.0f, 0.0f, 0.0f, std::min(1.0f, static_cast<float>(k.fix) / 128.0f));
+            {
+                const float alpha = std::min(1.0f, static_cast<float>(k.fix) / 128.0f);
+                if (alpha != m_gl.blendAlpha)
+                {
+                    ++m_stats.glStateCalls; glBlendColor(0.0f, 0.0f, 0.0f, alpha);
+                    m_gl.blendAlpha = alpha;
+                }
+            }
             GLenum src = GL_SRC_ALPHA, dst = GL_ONE_MINUS_SRC_ALPHA, eq = GL_FUNC_ADD;
             if (A == B)
             {
@@ -1055,42 +1098,94 @@ void main()
             else if (A == 2u && B == 0u && D == 1u) { src = factor; dst = GL_ONE; eq = GL_FUNC_REVERSE_SUBTRACT; } // Cd-Cs*C
             else if (A == 1u && B == 0u && D == 0u) { src = oneMinus; dst = factor; }     // (Cd-Cs)*C+Cs
             else if (A == 1u && B == 2u && D == 0u) { src = GL_ONE; dst = factor; }       // Cd*C+Cs
-            ++m_stats.glStateCalls; glBlendEquation(eq);
-            ++m_stats.glStateCalls; glBlendFunc(src, dst);
+            if (eq != m_gl.blendEq)
+            {
+                ++m_stats.glStateCalls; glBlendEquation(eq);
+                m_gl.blendEq = eq;
+            }
+            if (src != m_gl.blendSrc || dst != m_gl.blendDst)
+            {
+                ++m_stats.glStateCalls; glBlendFunc(src, dst);
+                m_gl.blendSrc = src;
+                m_gl.blendDst = dst;
+            }
         }
-        else
+        if (k.colorMask != m_gl.colorMask)
         {
-            ++m_stats.glStateCalls;
-            glDisable(GL_BLEND);
+            ++m_stats.glStateCalls; glColorMask((k.colorMask & 1u) != 0u, (k.colorMask & 2u) != 0u, (k.colorMask & 4u) != 0u, (k.colorMask & 8u) != 0u);
+            m_gl.colorMask = k.colorMask;
         }
-        ++m_stats.glStateCalls; glColorMask((k.colorMask & 1u) != 0u, (k.colorMask & 2u) != 0u, (k.colorMask & 4u) != 0u, (k.colorMask & 8u) != 0u);
 
-        ++m_stats.glStateCalls; glUniform1i(m_uTme, k.tme);
-        ++m_stats.glStateCalls; glUniform1i(m_uPal, k.pal);
-        ++m_stats.glStateCalls; glUniform1i(m_uTfx, k.tfx);
-        ++m_stats.glStateCalls; glUniform1i(m_uTcc, k.tcc);
-        ++m_stats.glStateCalls; glUniform1i(m_uFge, k.fge);
-        ++m_stats.glStateCalls; glUniform3f(m_uFog, k.fogR / 255.0f, k.fogG / 255.0f, k.fogB / 255.0f);
-        ++m_stats.glStateCalls; glUniform1i(m_uAte, k.ate);
-        ++m_stats.glStateCalls; glUniform1i(m_uAtst, k.atst);
-        ++m_stats.glStateCalls; glUniform1f(m_uAref, static_cast<float>(k.aref));
+        const auto uniformInt = [&](int location, int &cached, int value) {
+            if (value != cached)
+            {
+                ++m_stats.glStateCalls; glUniform1i(location, value);
+                cached = value;
+            }
+        };
+        const auto uniformFloat = [&](int location, float &cached, float value) {
+            if (value != cached)
+            {
+                ++m_stats.glStateCalls; glUniform1f(location, value);
+                cached = value;
+            }
+        };
+        uniformInt(m_uTme, m_gl.tme, k.tme);
+        uniformInt(m_uPal, m_gl.pal, k.pal);
+        uniformInt(m_uTfx, m_gl.tfx, k.tfx);
+        uniformInt(m_uTcc, m_gl.tcc, k.tcc);
+        uniformInt(m_uFge, m_gl.fge, k.fge);
+        const float fog[3] = {k.fogR / 255.0f, k.fogG / 255.0f, k.fogB / 255.0f};
+        if (std::memcmp(fog, m_gl.fog, sizeof(fog)) != 0)
+        {
+            ++m_stats.glStateCalls; glUniform3f(m_uFog, fog[0], fog[1], fog[2]);
+            std::memcpy(m_gl.fog, fog, sizeof(fog));
+        }
+        uniformInt(m_uAte, m_gl.ate, k.ate);
+        uniformInt(m_uAtst, m_gl.atst, k.atst);
+        uniformFloat(m_uAref, m_gl.aref, static_cast<float>(k.aref));
         if (k.tme)
         {
             const bool fromTarget = (k.texture & 0x80000000u) != 0u;
             const uint32_t id = k.texture & 0x7FFFFFFFu;
-            ++m_stats.glStateCalls; glBindTexture(GL_TEXTURE_2D, id);
+            if (id != m_gl.boundTexture)
+            {
+                ++m_stats.glStateCalls; glBindTexture(GL_TEXTURE_2D, id);
+                m_gl.boundTexture = id;
+            }
             const GLint filter = k.linear ? GL_LINEAR : GL_NEAREST;
-            ++m_stats.glStateCalls; glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
-            ++m_stats.glStateCalls; glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
-            ++m_stats.glStateCalls; glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, fromTarget ? GL_CLAMP_TO_EDGE : glWrap(k.wrapS));
-            ++m_stats.glStateCalls; glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, fromTarget ? GL_CLAMP_TO_EDGE : glWrap(k.wrapT));
+            const GLint wrapS = fromTarget ? GL_CLAMP_TO_EDGE : static_cast<GLint>(glWrap(k.wrapS));
+            const GLint wrapT = fromTarget ? GL_CLAMP_TO_EDGE : static_cast<GLint>(glWrap(k.wrapT));
+            TexParams &tp = m_texParams[id];
+            if (tp.minFilter != filter)
+            {
+                ++m_stats.glStateCalls; glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+                tp.minFilter = filter;
+            }
+            if (tp.magFilter != filter)
+            {
+                ++m_stats.glStateCalls; glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+                tp.magFilter = filter;
+            }
+            if (tp.wrapS != wrapS)
+            {
+                ++m_stats.glStateCalls; glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapS);
+                tp.wrapS = wrapS;
+            }
+            if (tp.wrapT != wrapT)
+            {
+                ++m_stats.glStateCalls; glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrapT);
+                tp.wrapT = wrapT;
+            }
             // s, t are normalised to the GS texture (tw x th); a target is 1024x512, so they shrink to its part.
-            ++m_stats.glStateCalls;
-            if (fromTarget)
-                glUniform2f(m_uTexScale, static_cast<float>(k.texW) / kTargetWidth, static_cast<float>(k.texH) / kTargetHeight);
-            else
-                glUniform2f(m_uTexScale, 1.0f, 1.0f);
-            ++m_stats.glStateCalls; glUniform1f(m_uTexAlpha, fromTarget ? 1.0f : 255.0f / 128.0f);
+            const float scale[2] = {fromTarget ? static_cast<float>(k.texW) / kTargetWidth : 1.0f,
+                                    fromTarget ? static_cast<float>(k.texH) / kTargetHeight : 1.0f};
+            if (std::memcmp(scale, m_gl.texScale, sizeof(scale)) != 0)
+            {
+                ++m_stats.glStateCalls; glUniform2f(m_uTexScale, scale[0], scale[1]);
+                std::memcpy(m_gl.texScale, scale, sizeof(scale));
+            }
+            uniformFloat(m_uTexAlpha, m_gl.texAlpha, fromTarget ? 1.0f : 255.0f / 128.0f);
         }
     }
 
@@ -1103,7 +1198,7 @@ void main()
         }
         if (!m_haveApplied || !(m_applied == m_key))
         {
-            ApplyKey(m_key);
+            ApplyKey(m_key, !m_haveApplied);
             m_applied = m_key;
             m_haveApplied = true;
         }

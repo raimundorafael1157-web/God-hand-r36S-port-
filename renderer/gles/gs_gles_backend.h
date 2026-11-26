@@ -18,6 +18,8 @@
 #include "runtime/gs/gs_backend_state.h"
 #include "runtime/gs/gs_cpu_backend.h"
 
+#include <GLES3/gl3.h>
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -153,7 +155,7 @@ namespace gles
         void PageRange(uint32_t bp, uint32_t bw, uint32_t psm, uint32_t w, uint32_t h, uint32_t &first, uint32_t &count) const;
         uint32_t PageGeneration(uint32_t first, uint32_t count) const;
         void Touch(uint32_t bp, uint32_t bw, uint32_t psm, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
-        void ApplyKey(const DrawKey &key);
+        void ApplyKey(const DrawKey &key, bool full);
         void FlushBatch();
         void RefreshClut();
 
@@ -184,6 +186,24 @@ namespace gles
 
         GSTransferCommand m_transfer{};
 
+        // The GL state ApplyKey last set, so a new batch sends only what changed. Valid while m_haveApplied holds:
+        // every other piece of code that touches GL state clears m_haveApplied, and the next ApplyKey sets it all.
+        struct GlStateCache
+        {
+            int depthTest = -1, blend = -1;
+            GLenum depthFunc = 0, blendEq = 0, blendSrc = 0, blendDst = 0;
+            int depthMask = -1, colorMask = -1;
+            float blendAlpha = -1.0f;
+            int scissor[4] = {-1, -1, -1, -1};
+            int tme = -1, pal = -1, tfx = -1, tcc = -1, fge = -1, ate = -1, atst = -1;
+            float fog[3] = {-1.0f, -1.0f, -1.0f}, aref = -1.0f, texScale[2] = {-1.0f, -1.0f}, texAlpha = -1.0f;
+            uint32_t boundTexture = ~0u;
+        } m_gl;
+        struct TexParams
+        {
+            GLint minFilter = -1, magFilter = -1, wrapS = -1, wrapT = -1;
+        };
+        std::unordered_map<uint32_t, TexParams> m_texParams; // per GL texture object: its parameters are object state
         std::vector<Vertex> m_vertices;
         DrawKey m_key{}, m_applied{};
         bool m_haveKey = false, m_haveApplied = false;
