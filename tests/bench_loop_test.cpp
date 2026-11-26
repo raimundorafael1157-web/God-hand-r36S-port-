@@ -1,6 +1,8 @@
 // Test of ps2x_bench::runLoop without the game: a fake runtime whose "game thread" advances the vsync tick at 60 Hz,
 // flips DISPFB1 every 2nd field (30 flips/s) and burns one core. Expected: fields/s ~60, flips/s ~30, cpu ~100%.
-#include "../runtime/ps2xRuntime/src/lib/ps2_bench.h"
+// Build from the repo root after scripts/setup_base.sh:
+//   c++ -std=c++20 -O2 -Isource/godhand-recomp/runtime/ps2xRuntime/src/lib tests/bench_loop_test.cpp -lpthread
+#include "ps2_bench.h"
 #include <atomic>
 #include <thread>
 
@@ -38,7 +40,7 @@ int main()
         }
     });
     const auto start = std::chrono::steady_clock::now();
-    ps2x_bench::runLoop(runtime, [&] { return std::chrono::steady_clock::now() - start > std::chrono::seconds(6); }, [](double) {});
+    ps2x_bench::runLoop(runtime, [&] { return std::chrono::steady_clock::now() - start > std::chrono::seconds(6); }, [](double) {}, [] {});
     stop = true;
     game.join();
 }

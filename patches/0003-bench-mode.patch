@@ -50,10 +50,10 @@ index 5879cff..f415cd4 100644
      const char *gpu = std::getenv("PS2X_GS_GPU");
 diff --git a/runtime/ps2xRuntime/src/lib/ps2_bench.h b/runtime/ps2xRuntime/src/lib/ps2_bench.h
 new file mode 100644
-index 0000000..b5c3091
+index 0000000..2b10636
 --- /dev/null
 +++ b/runtime/ps2xRuntime/src/lib/ps2_bench.h
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,271 @@
 +#pragma once
 +// RK3326 port: the measurement loop of PS2X_BENCH=1 (ps2_runtime.cpp, PS2Runtime::run). It replaces the present loop
 +// when there is no window: nothing is drawn, the game thread runs exactly as in a normal run, and this thread only
@@ -172,6 +172,38 @@ index 0000000..b5c3091
 +#endif
 +    }
 +
++    // Current CPU0 clock in MHz and the hottest thermal zone in degrees C (0 when unreadable): thermal throttling on a
++    // handheld shows up here before it shows up as a mystery slowdown.
++    inline int readSysInt(const char *path)
++    {
++#if defined(__linux__)
++        FILE *file = std::fopen(path, "r");
++        if (!file)
++            return 0;
++        long long value = 0;
++        const int got = std::fscanf(file, "%lld", &value);
++        std::fclose(file);
++        return got == 1 ? static_cast<int>(value) : 0;
++#else
++        (void)path;
++        return 0;
++#endif
++    }
++
++    inline int cpuMhz() { return readSysInt("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq") / 1000; }
++
++    inline int hottestC()
++    {
++        int best = 0;
++        for (int i = 0; i < 8; ++i)
++        {
++            char path[64];
++            std::snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/temp", i);
++            best = std::max(best, readSysInt(path));
++        }
++        return best > 1000 ? best / 1000 : best;
++    }
++
 +    inline double percentile(std::vector<double> values, double p)
 +    {
 +        if (values.empty())
@@ -181,8 +213,10 @@ index 0000000..b5c3091
 +        return values[std::min(index, values.size() - 1)];
 +    }
 +
-+    template <typename Runtime, typename StopFn, typename SecondFn>
-+    void runLoop(Runtime &runtime, StopFn &&shouldStop, SecondFn &&onSecond)
++    // onPoll() runs every ~16 ms (ps2_runtime.cpp: input sampling, so PS2X_PAD_SCRIPT / PS2X_PAD_FIFO still drive the
++    // game with no window, as the present loop would).
++    template <typename Runtime, typename StopFn, typename SecondFn, typename PollFn>
++    void runLoop(Runtime &runtime, StopFn &&shouldStop, SecondFn &&onSecond, PollFn &&onPoll)
 +    {
 +        using Clock = std::chrono::steady_clock;
 +        const double warmup = [] {
@@ -209,10 +243,16 @@ index 0000000..b5c3091
 +        double cpuSum = 0.0;
 +
 +        std::fprintf(stderr, "[bench] started; warmup %.0f s excluded from the summary\n", warmup);
++        auto lastPoll = start;
 +        while (!shouldStop())
 +        {
 +            std::this_thread::sleep_for(std::chrono::milliseconds(2));
 +            const auto now = Clock::now();
++            if (now - lastPoll >= std::chrono::milliseconds(16))
++            {
++                lastPoll = now;
++                onPoll();
++            }
 +            const uint64_t d1 = __atomic_load_n(&gs.dispfb1, __ATOMIC_RELAXED);
 +            const uint64_t d2 = __atomic_load_n(&gs.dispfb2, __ATOMIC_RELAXED);
 +            if (d1 != lastDispfb1 || d2 != lastDispfb2)
@@ -248,8 +288,8 @@ index 0000000..b5c3091
 +                std::snprintf(part, sizeof(part), " %s=%.0f%%", sample.name.c_str(), share);
 +                threadText += part;
 +            }
-+            std::fprintf(stderr, "[bench] t=%.0f fields/s=%.1f speed=%.0f%% flips/s=%.1f worst=%.0fms cpu=%.0f%% rss=%.0fMB |%s\n",
-+                         t, fieldRate, 100.0 * fieldRate / 59.94, flipRate, worstGapMs, cpu, rss, threadText.c_str());
++            std::fprintf(stderr, "[bench] t=%.0f fields/s=%.1f speed=%.0f%% flips/s=%.1f worst=%.0fms cpu=%.0f%% rss=%.0fMB mhz=%d temp=%dC |%s\n",
++                         t, fieldRate, 100.0 * fieldRate / 59.94, flipRate, worstGapMs, cpu, rss, cpuMhz(), hottestC(), threadText.c_str());
 +
 +            onSecond(t);
 +            if (t >= warmup)
@@ -286,7 +326,7 @@ index 0000000..b5c3091
 +    }
 +}
 diff --git a/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp b/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp
-index ebcc0ae..e7e0217 100644
+index ebcc0ae..c4f558d 100644
 --- a/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp
 +++ b/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp
 @@ -49,6 +49,8 @@ namespace ps2_stubs
@@ -336,7 +376,7 @@ index ebcc0ae..e7e0217 100644
  #endif
          const bool coreReady = syncCoreSubsystems();
          GSSharedPresent::RestoreHostContext();
-@@ -3018,6 +3037,35 @@ void PS2Runtime::run()
+@@ -3018,6 +3037,36 @@ void PS2Runtime::run()
      uint32_t lastHashHeight = 0u;
      bool hadHash = false;
      ps2_host_display::FpsOverlay fpsOverlay;
@@ -366,13 +406,14 @@ index ebcc0ae..e7e0217 100644
 +                    std::cerr << "[bench] saving save state " << saveState << " at t=" << t << std::endl;
 +                    ps2x::savestate::requestSave(saveState);
 +                }
-+            });
++            },
++            [] { ps2_host_input::sample(); });
 +    }
 +    else
      while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
      {
          if (IsWindowMinimized())
-@@ -3285,8 +3333,11 @@ void PS2Runtime::run()
+@@ -3285,8 +3334,11 @@ void PS2Runtime::run()
      if (frameTex.id != 0)
          UnloadTexture(frameTex);
      GSSharedPresent::ShutdownHost();
