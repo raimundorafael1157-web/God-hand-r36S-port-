@@ -1,0 +1,111 @@
+diff --git a/runtime/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/runtime/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index 60a5176..6e10270 100644
+--- a/runtime/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/runtime/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -1164,6 +1164,32 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
+     const uint32_t dsax = m_transfer.trxpos.dsax;
+     uint32_t offset = 0u;
+ 
++    // RK3326 port: the same writes in the same order as one WriteVramUnlocked per pixel, without its per-pixel cost:
++    // the format is looked up once, the row part of the swizzle once per row, and the position moves on by one pixel
++    // at a time instead of a division and a remainder per pixel. Every write still goes through
++    // m_textureCache.BeforeWrite first, as WriteVramUnlocked does.
++    const GSSwizzle::Format &format = GSSwizzle::GetFormat(dpsm);
++    const bool validFormat = format.kind != GSSwizzle::Kind::Invalid;
++    const uint32_t rowEnd = dsax + rrw;
++    uint32_t x = m_transferState.x;
++    uint32_t y = m_transferState.y;
++    uint32_t rowY = y;
++    GSSwizzle::AxisPart row = GSSwizzle::RowPart(format, dbp, dbw, y);
++
++    auto storeAt = [&](uint32_t px, uint32_t py, uint32_t value)
++    {
++        if (!validFormat)
++            return;
++        if (py != rowY)
++        {
++            row = GSSwizzle::RowPart(format, dbp, dbw, py);
++            rowY = py;
++        }
++        const GSSwizzle::Location loc = GSSwizzle::Combine(format, row, GSSwizzle::ColumnPart(format, px));
++        m_textureCache.BeforeWrite(m_vram, loc.byte);
++        GSSwizzle::StoreAt(format, m_vram + loc.byte, loc.shift, value);
++    };
++
+     auto advancePixel = [&](uint32_t count)
+     {
+         const uint32_t totalPixels = m_transferState.totalPixels;
+@@ -1177,8 +1203,14 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
+             return;
+         }
+ 
+-        m_transferState.x = dsax + (m_transferState.copiedPixels % rrw);
+-        m_transferState.y = m_transfer.trxpos.dsay + (m_transferState.copiedPixels / rrw);
++        x += count;
++        while (x >= rowEnd)
++        {
++            x -= rrw;
++            ++y;
++        }
++        m_transferState.x = x;
++        m_transferState.y = y;
+     };
+ 
+     while (offset < sizeBytes && m_transferState.direction == 0u)
+@@ -1192,7 +1224,7 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
+                 return;
+             uint32_t value = 0u;
+             std::memcpy(&value, data + offset, sizeof(value));
+-            WriteVramUnlocked(dpsm, dbp, dbw, m_transferState.x, m_transferState.y, value);
++            storeAt(x, y, value);
+             offset += 4u;
+             advancePixel(1u);
+             break;
+@@ -1205,7 +1237,7 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
+             const uint32_t value = static_cast<uint32_t>(data[offset]) |
+                                    (static_cast<uint32_t>(data[offset + 1u]) << 8u) |
+                                    (static_cast<uint32_t>(data[offset + 2u]) << 16u);
+-            WriteVramUnlocked(dpsm, dbp, dbw, m_transferState.x, m_transferState.y, value);
++            storeAt(x, y, value);
+             offset += 3u;
+             advancePixel(1u);
+             break;
+@@ -1219,14 +1251,14 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
+                 return;
+             uint16_t value = 0u;
+             std::memcpy(&value, data + offset, sizeof(value));
+-            WriteVramUnlocked(dpsm, dbp, dbw, m_transferState.x, m_transferState.y, value);
++            storeAt(x, y, value);
+             offset += 2u;
+             advancePixel(1u);
+             break;
+         }
+         case GS_PSM_T8:
+         case GS_PSM_T8H:
+-            WriteVramUnlocked(dpsm, dbp, dbw, m_transferState.x, m_transferState.y, data[offset++]);
++            storeAt(x, y, data[offset++]);
+             advancePixel(1u);
+             break;
+         case GS_PSM_T4:
+@@ -1235,17 +1267,12 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
+         {
+             const uint8_t packed = data[offset++];
+             const uint32_t firstPixel = m_transferState.copiedPixels;
+-            WriteVramUnlocked(dpsm, dbp, dbw,
+-                              dsax + (firstPixel % rrw),
+-                              m_transfer.trxpos.dsay + (firstPixel / rrw),
+-                              packed & 0x0Fu);
++            storeAt(x, y, packed & 0x0Fu);
+             if (firstPixel + 1u < m_transferState.totalPixels)
+             {
+-                const uint32_t secondPixel = firstPixel + 1u;
+-                WriteVramUnlocked(dpsm, dbp, dbw,
+-                                  dsax + (secondPixel % rrw),
+-                                  m_transfer.trxpos.dsay + (secondPixel / rrw),
+-                                  (packed >> 4u) & 0x0Fu);
++                // The next pixel of the transfer rectangle (the row may end between the two).
++                const bool wraps = x + 1u >= rowEnd;
++                storeAt(wraps ? dsax : x + 1u, wraps ? y + 1u : y, (packed >> 4u) & 0x0Fu);
+             }
+             advancePixel(std::min<uint32_t>(2u, m_transferState.totalPixels - firstPixel));
+             break;

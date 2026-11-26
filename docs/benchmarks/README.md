@@ -32,3 +32,20 @@ aquecimento fora da conta, execuções de A e B intercaladas). Os resultados de 
 
 Conclusão: nesta VM, pelo tempo, só diferenças acima de ~9% na GameThread são detectáveis com 4 execuções. Ganhos
 menores precisam de contadores exatos (como os do renderizador) ou do aparelho.
+
+## Patch 0010 — upload rápido para a VRAM (26/11/2026)
+
+`2026-11-26-pc-0010-gs-upload.json`: A = referência (0001–0009), B = com 0010, 4 execuções cada.
+
+| Medida | A | B | B−A (intervalo ~95%) |
+| --- | --- | --- | --- |
+| GSThread | 2,20 ms/field ± 0,08 | 1,55 ms/field ± 0,13 | **−0,65 ± 0,15 (−29,4%)** |
+| GameThread | 10,89 ms/field ± 0,26 | 11,41 ms/field ± 1,23 | +0,52 ± 1,23 (ruído) |
+| Áudio | 3.273,5 B/field | 3.271,4 B/field | −2,1 ± 1,1 |
+| GS | idêntico nas 8 execuções | | |
+
+A média de B na GameThread sobe por uma única execução lenta da VM (jogo, IOP e GS subiram juntos e a velocidade
+caiu para 96%); as outras três ficaram em 10,7–10,9 ms, como A. A mudança não toca a GameThread.
+Equivalência: `renderer/gles/tests/gs_upload_test.cpp`, 520 casos (13 formatos, larguras ímpares, uploads cortados
+em pedaços) com VRAM idêntica byte a byte à escrita pixel a pixel; no microbenchmark, de 7,2–8,5 para ~4,9–6,0
+ns/pixel no x86. Ganho no Cortex-A35: a medir.
