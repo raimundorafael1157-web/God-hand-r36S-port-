@@ -10,6 +10,7 @@
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_recording.h"
 
+#include <EGL/egl.h>
 #include <GLES3/gl3.h>
 
 #include <algorithm>
@@ -58,8 +59,57 @@ int main(int argc, char **argv)
     if (argc < 2)
     {
         std::fprintf(stderr, "usage: gles_replay <recording.gsr> [--dump <dir>] [--dump-every <n>] [--fbp <hex>] "
-                             "[--size <w>x<h>] [--repeat <n>] [--frames <n>]\n");
+                             "[--size <w>x<h>] [--repeat <n>] [--frames <n>]\n"
+                             "       gles_replay --gl-info   (the device's EGL/GLES: vendor, version, extensions)\n");
         return 2;
+    }
+    // --gl-info: what the driver offers, for collect_hw_info.sh (no recording needed). Answers which driver the
+    // firmware ships (ARM blob or Panfrost), whether the context comes from GBM, surfaceless or the default display,
+    // and which extensions exist (EXT_buffer_storage, EXT_disjoint_timer_query...).
+    if (std::string(argv[1]) == "--gl-info")
+    {
+        gles::HeadlessContext context;
+        std::string error;
+        if (!context.Create(error))
+        {
+            std::printf("[gl-info] no context: %s\n", error.c_str());
+            return 1;
+        }
+        const auto str = [](GLenum name) { const GLubyte *v = glGetString(name); return v ? reinterpret_cast<const char *>(v) : "(null)"; };
+        std::printf("[gl-info] context: %s\n", context.description.c_str());
+        std::printf("[gl-info] GL_VENDOR: %s\n[gl-info] GL_RENDERER: %s\n[gl-info] GL_VERSION: %s\n[gl-info] GLSL: %s\n",
+                    str(GL_VENDOR), str(GL_RENDERER), str(GL_VERSION), str(GL_SHADING_LANGUAGE_VERSION));
+        EGLDisplay display = static_cast<EGLDisplay>(context.display);
+        const char *eglVendor = eglQueryString(display, EGL_VENDOR);
+        const char *eglVersion = eglQueryString(display, EGL_VERSION);
+        const char *eglExt = eglQueryString(display, EGL_EXTENSIONS);
+        std::printf("[gl-info] EGL_VENDOR: %s\n[gl-info] EGL_VERSION: %s\n[gl-info] EGL_EXTENSIONS: %s\n",
+                    eglVendor ? eglVendor : "(null)", eglVersion ? eglVersion : "(null)", eglExt ? eglExt : "(null)");
+        GLint count = 0;
+        glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+        std::printf("[gl-info] GL_EXTENSIONS (%d):", count);
+        for (GLint i = 0; i < count; ++i)
+            std::printf(" %s", reinterpret_cast<const char *>(glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i))));
+        std::printf("\n");
+        // The ones the renderer's next decisions hang on (docs: technique 8 persistent vertex buffers, GPU timing,
+        // framebuffer fetch for blending, debug output).
+        const char *wanted[] = {"GL_EXT_buffer_storage", "GL_EXT_disjoint_timer_query", "GL_EXT_shader_framebuffer_fetch",
+                                "GL_ARM_shader_framebuffer_fetch", "GL_EXT_color_buffer_float", "GL_KHR_debug",
+                                "GL_EXT_texture_border_clamp", "GL_OES_texture_buffer"};
+        std::printf("[gl-info] key extensions:");
+        for (const char *name : wanted)
+        {
+            bool found = false;
+            for (GLint i = 0; i < count && !found; ++i)
+                found = std::strcmp(reinterpret_cast<const char *>(glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i))), name) == 0;
+            std::printf(" %s=%s", name + 3, found ? "yes" : "no");
+        }
+        std::printf("\n");
+        GLint maxTexture = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTexture);
+        std::printf("[gl-info] GL_MAX_TEXTURE_SIZE: %d\n", maxTexture);
+        context.Destroy();
+        return 0;
     }
     std::string path = argv[1], dumpDir;
     int dumpEvery = 10, repeat = 1;

@@ -33,6 +33,12 @@ try 'eglinfo 2>/dev/null | head -80'
 try 'es2_info 2>/dev/null | head -30'
 try 'glxinfo -B 2>/dev/null | head -30'
 try 'vulkaninfo --summary 2>/dev/null | head -60'
+# O que o driver da Mali oferece de fato (gles_replay vem no pacote): blob da ARM ou Panfrost, contexto por GBM,
+# surfaceless ou display padrão (fbdev), e extensões como GL_EXT_buffer_storage e GL_EXT_disjoint_timer_query.
+try '"$(dirname "$0")/gles_replay" --gl-info'
+try 'ls -l /usr/lib/aarch64-linux-gnu/libmali* /usr/lib/libmali* 2>/dev/null'
+try 'ls /usr/lib/aarch64-linux-gnu/dri/ 2>/dev/null | head'
+try 'cat /proc/fb 2>/dev/null; ls -l /dev/fb* 2>/dev/null'
 try 'ls /usr/share/vulkan/icd.d/ 2>/dev/null'
 
 sec "Tela"
@@ -46,6 +52,7 @@ try 'ls /usr/lib/aarch64-linux-gnu/ | grep -iE "libSDL2|libasound|libpulse|pipew
 sec "Bibliotecas de base (para a cross-compilation)"
 try 'ldd --version | head -1'
 try 'ls -l /usr/lib/aarch64-linux-gnu/libSDL2*'
+try 'ls -l /home/ark/.emulationstation/es_input.cfg /etc/emulationstation/es_input.cfg 2>/dev/null'
 try 'strings /usr/lib/aarch64-linux-gnu/libstdc++.so.6 2>/dev/null | grep -E "^GLIBCXX_[0-9.]+$" | tail -3'
 
 sec "Armazenamento e temperatura"
