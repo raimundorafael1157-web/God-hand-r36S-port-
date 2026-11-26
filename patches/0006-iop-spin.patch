@@ -1,0 +1,32 @@
+diff --git a/runtime/ps2xIOP/src/iop_subsystem.cpp b/runtime/ps2xIOP/src/iop_subsystem.cpp
+index 421ae7c..5e8cc20 100644
+--- a/runtime/ps2xIOP/src/iop_subsystem.cpp
++++ b/runtime/ps2xIOP/src/iop_subsystem.cpp
+@@ -34,6 +34,9 @@
+ #if defined(_M_X64) || defined(__x86_64__)
+ #include <immintrin.h>
+ #define PS2X_IOP_SPIN_PAUSE() _mm_pause()
++#elif defined(__aarch64__) || defined(__arm__)
++// RK3326 port: the ARM spin hint, not std::this_thread::yield(), which is a system call on every turn of the loop.
++#define PS2X_IOP_SPIN_PAUSE() __asm__ __volatile__("yield" ::: "memory")
+ #else
+ #define PS2X_IOP_SPIN_PAUSE() std::this_thread::yield()
+ #endif
+@@ -434,7 +437,16 @@ namespace ps2x::iop
+                     if (++spins < 1024u)
+                         continue;
+                     spins = 0u;
+-                    if (std::chrono::steady_clock::now() - idleSince < std::chrono::milliseconds(2))
++                    // RK3326 port: PS2X_IOP_SPIN_US sets this spin (default 2000 us, as before). On a handheld a shorter
++                    // spin keeps a core from sitting at 100% between batches (heat, clock throttling) at the cost of a
++                    // wake-up delay; the bench mode measures both.
++                    static const auto kSpin = []
++                    {
++                        const char *value = std::getenv("PS2X_IOP_SPIN_US");
++                        const long us = value && *value ? std::strtol(value, nullptr, 10) : 2000L;
++                        return std::chrono::microseconds(us < 0L ? 0L : us);
++                    }();
++                    if (std::chrono::steady_clock::now() - idleSince < kSpin)
+                         continue;
+                     std::unique_lock<std::mutex> lock(wakeMutex);
+                     workerSleeping.store(true, std::memory_order_release);

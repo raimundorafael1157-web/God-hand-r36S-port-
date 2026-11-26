@@ -1,6 +1,7 @@
 #!/bin/sh
 # Builds godhand for the R36S (aarch64, glibc 2.30, raylib on KMS/DRM) from source/godhand-recomp.
 #   scripts/build_rk3326.sh generate <iso>   # once per disc: game code from YOUR disc (Linux x86_64 recompiler)
+#   scripts/build_rk3326.sh vu1 <iso>        # VU1 microcode ahead of time (x86_64 run of the game, ~5 min of play)
 #   scripts/build_rk3326.sh build            # the ARM64 binary -> builds/rk3326/godhand
 # Generated code stays in source/ (git-ignored): never commit it, it is derived from the game.
 set -eu
@@ -28,6 +29,31 @@ generate)
     python3 -I tools/snr2/gen_modules.py
     python3 -I build.py modules
     ;;
+vu1)
+    # The game's VU1 programs run in an interpreter unless compiled ahead of time. In the opening cutscene that alone
+    # took the game from ~100% to 10-23% speed even on a PC (null GS). This builds the game for the PC, plays the
+    # opening with no window while saving each VU1 program it meets, and compiles them into generated/vu1/.
+    ISO=${2:?usage: build_rk3326.sh vu1 <path-to-your-SLUS-21503.iso>}
+    case "$ISO" in /*) ;; *) ISO="$CALLER_DIR/$ISO";; esac
+    [ -f generated/register_functions.cpp ] || { echo "no generated code: run 'build_rk3326.sh generate <iso>' first"; exit 1; }
+    cmake -S . -B build-host -G Ninja -DCMAKE_BUILD_TYPE=Release -DGODHAND_BUILD_RECOMP=ON -DGODHAND_BUILD_TOOLS=ON \
+        -DGODHAND_DEBUG_UI=OFF -DCMAKE_C_FLAGS=-msse4.1 -DCMAKE_CXX_FLAGS=-msse4.1
+    ninja -C build-host vu1_recomp
+    cmake -S . -B build-x64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DGODHAND_DEBUG_UI=OFF \
+        -DCMAKE_C_FLAGS=-msse4.1 -DCMAKE_CXX_FLAGS=-msse4.1
+    ninja -C build-x64 -j "$JOBS" godhand
+    CAP="$SRC/build/vu1_capture"
+    mkdir -p "$CAP"
+    # Title -> NEW GAME -> NORMAL, then the opening cutscene and the start of stage 1 (times in PS2 fields: the same on
+    # any machine speed). More play captures more programs; each run only adds to the folder.
+    GODHAND_HEADLESS=1 PS2X_BENCH=1 PS2X_GS_NULL=1 GODHAND_DUMP_ON_TIME_LIMIT=0 GODHAND_ISO_PREFETCH=0 \
+        PS2X_PAD_SCRIPT="1300v:start:10,1500v:circle:10,1700v:circle:10" PS2X_VU1_CAPTURE="$CAP" \
+        ./build-x64/bin/godhand --iso "$ISO" --headless --time-limit "${VU1_SECONDS:-240}" || true
+    ls "$CAP"/vu1_*.bin >/dev/null 2>&1 || { echo "no VU1 program captured"; exit 1; }
+    mkdir -p generated/vu1
+    ./build-host/runtime/ps2xTest/vu1_recomp "$CAP" generated/vu1
+    echo "VU1 programs compiled: $(ls "$CAP"/vu1_*.bin | wc -l); run 'build_rk3326.sh build' next"
+    ;;
 build)
     [ -f generated/register_functions.cpp ] || { echo "no generated code: run 'build_rk3326.sh generate <iso>' first"; exit 1; }
     python3 -m ziglang version >/dev/null 2>&1 || python3 -m pip install --user ziglang==0.17.1
@@ -37,10 +63,16 @@ build)
         -DGODHAND_DEBUG_UI=OFF -DPLATFORM=DRM
     ninja -C build-rk3326 -j "$JOBS" godhand
     mkdir -p "$REPO/builds/rk3326"
-    cp build-rk3326/bin/godhand "$REPO/builds/rk3326/godhand"
-    cp "$REPO/scripts/run_bench.sh" "$REPO/builds/rk3326/"
+    # Debug info makes it ~640 MB; stripped ~90 MB.
+    if command -v aarch64-linux-gnu-strip >/dev/null 2>&1; then
+        aarch64-linux-gnu-strip -o "$REPO/builds/rk3326/godhand" build-rk3326/bin/godhand
+    else
+        echo "aarch64-linux-gnu-strip not found (apt install binutils-aarch64-linux-gnu): copying the ~640 MB unstripped binary"
+        cp build-rk3326/bin/godhand "$REPO/builds/rk3326/godhand"
+    fi
+    cp "$REPO/scripts/run_bench.sh" "$REPO/scripts/collect_hw_info.sh" "$REPO/builds/rk3326/"
     echo "binary: $REPO/builds/rk3326/godhand"
     ;;
 *)
-    echo "usage: build_rk3326.sh generate <iso> | build"; exit 1;;
+    echo "usage: build_rk3326.sh generate <iso> | vu1 <iso> | build"; exit 1;;
 esac

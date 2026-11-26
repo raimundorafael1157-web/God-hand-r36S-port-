@@ -68,7 +68,7 @@ Copie `builds/rk3326/` para o cartão SD e, num terminal do aparelho:
 
 ```sh
 sh collect_hw_info.sh > hw.txt                        # dados do hardware
-sh run_bench.sh "/roms/ps2/God Hand (USA).iso" cpu 300   # 5 minutos, só a lógica do jogo
+sh run_bench.sh "/roms/ps2/God Hand (USA).iso" cpu 600   # 10 minutos, só a lógica do jogo: abertura e começo da fase 1
 ```
 
 O resultado sai numa linha `[bench-summary]` e num arquivo `bench-*.log`. O que cada número quer dizer está em
