@@ -35,7 +35,8 @@ try 'glxinfo -B 2>/dev/null | head -30'
 try 'vulkaninfo --summary 2>/dev/null | head -60'
 # O que o driver da Mali oferece de fato (gles_replay vem no pacote): blob da ARM ou Panfrost, contexto por GBM,
 # surfaceless ou display padrão (fbdev), e extensões como GL_EXT_buffer_storage e GL_EXT_disjoint_timer_query.
-try '"$(dirname "$0")/gles_replay" --gl-info'
+try 'ldd "$(dirname "$0")/gles_replay"'
+try 'D=$(dirname "$0"); if ldd "$D/gles_replay" 2>&1 | grep -q "libgbm.so.1 => not found"; then export LD_LIBRARY_PATH="$D/stubs-gles"; echo "(libgbm ausente: stub)"; fi; "$D/gles_replay" --gl-info; "$D/gles_replay" --hash-bench'
 try 'ls -l /usr/lib/aarch64-linux-gnu/libmali* /usr/lib/libmali* 2>/dev/null'
 try 'ls /usr/lib/aarch64-linux-gnu/dri/ 2>/dev/null | head'
 try 'cat /proc/fb 2>/dev/null; ls -l /dev/fb* 2>/dev/null'

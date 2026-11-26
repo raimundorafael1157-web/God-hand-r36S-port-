@@ -99,6 +99,9 @@ build)
     fi
     cp "$REPO/scripts/run_bench.sh" "$REPO/scripts/collect_hw_info.sh" "$REPO/scripts/run_gles.sh" "$REPO/builds/rk3326/"
     "$REPO/scripts/make_gl_stubs.sh" "$REPO/builds/rk3326/godhand" "$REPO/builds/rk3326/stubs"
+    # gles_replay: only libgbm may be stubbed (fbdev Mali firmwares have none); its EGL/GLES must be the device's.
+    TMPSTUB=$(mktemp -d); "$REPO/scripts/make_gl_stubs.sh" "$REPO/builds/rk3326/gles_replay" "$TMPSTUB" >/dev/null
+    mkdir -p "$REPO/builds/rk3326/stubs-gles"; cp "$TMPSTUB/libgbm.so.1" "$REPO/builds/rk3326/stubs-gles/"; rm -rf "$TMPSTUB"
     echo "binary: $REPO/builds/rk3326/godhand"
     ;;
 *)

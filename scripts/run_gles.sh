@@ -27,6 +27,13 @@ fi
 restore() { for p in $GOV_SAVE; do echo "${p#*=}" > "${p%%=*}" 2>/dev/null; done; }
 trap restore EXIT INT TERM
 
+# Firmwares whose Mali driver is the fbdev build have no libgbm: gles_replay then takes the empty one in
+# stubs-gles/ (gbm_create_device returns nothing, and the context falls back to the default EGL display). EGL and
+# GLES are never stubbed: they must be the device's own.
+if command -v ldd >/dev/null 2>&1 && ldd "$DIR/gles_replay" 2>&1 | grep -q "libgbm.so.1 => not found"; then
+    echo "libgbm missing: using stubs-gles/libgbm.so.1 (fbdev Mali driver)" | tee -a "$LOG"
+    export LD_LIBRARY_PATH="$DIR/stubs-gles${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" "$DIR/gles_replay" "$GSR" --repeat "$REPEAT" --dump "$DIR" --dump-every 60 >> "$LOG" 2>&1
 echo "exit code $?" >> "$LOG"
 grep -E "gles\]|gles-summary" "$LOG"
