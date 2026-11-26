@@ -48,6 +48,14 @@ if [ -n "$STATE" ]; then
     export PS2X_BENCH_LOAD_STATE="$STATE" PS2X_BENCH_LOAD_AT=${LOAD_AT:-15} PS2X_BENCH_WARMUP=$(( ${LOAD_AT:-15} + 10 ))
 fi
 
+# The binary links libEGL/libGLESv2/libgbm/libdrm even when it draws nothing: a missing one stops it before main.
+if command -v ldd >/dev/null 2>&1; then
+    { echo "== ldd"; ldd "$DIR/godhand"; } >> "$LOG" 2>&1
+    if ldd "$DIR/godhand" 2>&1 | grep -q "not found"; then
+        echo "missing libraries (see $LOG):"; ldd "$DIR/godhand" | grep "not found"; exit 1
+    fi
+fi
+
 echo "measuring ($MODE, $SECONDS_LIMIT s)... log: $LOG"
 "$DIR/godhand" --iso "$ISO" --headless --time-limit "$SECONDS_LIMIT" >> "$LOG" 2>&1
 echo "exit code $?" >> "$LOG"

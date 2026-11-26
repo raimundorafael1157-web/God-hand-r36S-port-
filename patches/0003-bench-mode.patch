@@ -50,10 +50,10 @@ index 5879cff..f415cd4 100644
      const char *gpu = std::getenv("PS2X_GS_GPU");
 diff --git a/runtime/ps2xRuntime/src/lib/ps2_bench.h b/runtime/ps2xRuntime/src/lib/ps2_bench.h
 new file mode 100644
-index 0000000..2b10636
+index 0000000..8fead07
 --- /dev/null
 +++ b/runtime/ps2xRuntime/src/lib/ps2_bench.h
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,285 @@
 +#pragma once
 +// RK3326 port: the measurement loop of PS2X_BENCH=1 (ps2_runtime.cpp, PS2Runtime::run). It replaces the present loop
 +// when there is no window: nothing is drawn, the game thread runs exactly as in a normal run, and this thread only
@@ -61,9 +61,11 @@ index 0000000..2b10636
 +//
 +// What each number is:
 +//   fields/s  - emulated vsync fields per second (the EE scheduler's vsync tick); 59.94 = PS2 real time.
-+//   flips/s   - changes of the displayed frame buffer (GS DISPFB1/DISPFB2), sampled every 2 ms. A double-buffered
-+//               game flips once per game frame, so this is the game's own frame rate. 0 means the game does not
-+//               flip DISPFB (then only fields/s is meaningful).
++//   flips/s   - changes of the displayed frame buffer's base page (FBP, bits 0-8 of GS DISPFB1/DISPFB2), sampled
++//               every 2 ms. A double-buffered game swaps FBP once per game frame, so this is its own frame rate.
++//   disp/s    - changes of anything in DISPFB1/DISPFB2 (FBP or the DBX/DBY offset). An interlaced game moves DBY every
++//               field, so disp/s can read 60 while flips/s reads the real 30. If flips/s is 0 and disp/s is not, the
++//               game flips by offset inside one buffer: then disp/s is the frame rate.
 +//   worst     - the longest gap between two flips in the window, in ms.
 +//   cpu       - process CPU time / wall time (100% = one full core; 400% = all four RK3326 cores).
 +//   threads   - CPU share of each busy thread (GameThread = recompiled EE code; VUThread, GSThread, GIFThread...).
@@ -235,11 +237,12 @@ index 0000000..2b10636
 +        uint64_t startField = gs.vsyncTick.load(std::memory_order_relaxed);
 +        uint64_t lastDispfb1 = __atomic_load_n(&gs.dispfb1, __ATOMIC_RELAXED);
 +        uint64_t lastDispfb2 = __atomic_load_n(&gs.dispfb2, __ATOMIC_RELAXED);
-+        uint32_t flips = 0;
++        uint32_t flips = 0, dispChanges = 0;
++        constexpr uint64_t kFbpMask = 0x1FFu;
 +        double worstGapMs = 0.0;
 +        double cpuStart = processCpuSeconds();
 +        auto threadsStart = sampleThreads();
-+        std::vector<double> fieldRates, flipRates, worstGaps, rssValues;
++        std::vector<double> fieldRates, flipRates, dispRates, worstGaps, rssValues;
 +        double cpuSum = 0.0;
 +
 +        std::fprintf(stderr, "[bench] started; warmup %.0f s excluded from the summary\n", warmup);
@@ -257,11 +260,15 @@ index 0000000..2b10636
 +            const uint64_t d2 = __atomic_load_n(&gs.dispfb2, __ATOMIC_RELAXED);
 +            if (d1 != lastDispfb1 || d2 != lastDispfb2)
 +            {
++                ++dispChanges;
++                if ((d1 & kFbpMask) != (lastDispfb1 & kFbpMask) || (d2 & kFbpMask) != (lastDispfb2 & kFbpMask))
++                {
++                    ++flips;
++                    worstGapMs = std::max(worstGapMs, std::chrono::duration<double, std::milli>(now - lastFlip).count());
++                    lastFlip = now;
++                }
 +                lastDispfb1 = d1;
 +                lastDispfb2 = d2;
-+                ++flips;
-+                worstGapMs = std::max(worstGapMs, std::chrono::duration<double, std::milli>(now - lastFlip).count());
-+                lastFlip = now;
 +            }
 +            const double seconds = std::chrono::duration<double>(now - windowStart).count();
 +            if (seconds < 1.0)
@@ -272,6 +279,7 @@ index 0000000..2b10636
 +            const auto threadsNow = sampleThreads();
 +            const double fieldRate = static_cast<double>(field - startField) / seconds;
 +            const double flipRate = static_cast<double>(flips) / seconds;
++            const double dispRate = static_cast<double>(dispChanges) / seconds;
 +            const double cpu = 100.0 * (cpuNow - cpuStart) / seconds;
 +            const double rss = rssMegabytes();
 +            const double t = std::chrono::duration<double>(now - start).count();
@@ -288,14 +296,15 @@ index 0000000..2b10636
 +                std::snprintf(part, sizeof(part), " %s=%.0f%%", sample.name.c_str(), share);
 +                threadText += part;
 +            }
-+            std::fprintf(stderr, "[bench] t=%.0f fields/s=%.1f speed=%.0f%% flips/s=%.1f worst=%.0fms cpu=%.0f%% rss=%.0fMB mhz=%d temp=%dC |%s\n",
-+                         t, fieldRate, 100.0 * fieldRate / 59.94, flipRate, worstGapMs, cpu, rss, cpuMhz(), hottestC(), threadText.c_str());
++            std::fprintf(stderr, "[bench] t=%.0f fields/s=%.1f speed=%.0f%% flips/s=%.1f disp/s=%.1f worst=%.0fms cpu=%.0f%% rss=%.0fMB mhz=%d temp=%dC |%s\n",
++                         t, fieldRate, 100.0 * fieldRate / 59.94, flipRate, dispRate, worstGapMs, cpu, rss, cpuMhz(), hottestC(), threadText.c_str());
 +
 +            onSecond(t);
 +            if (t >= warmup)
 +            {
 +                fieldRates.push_back(fieldRate);
 +                flipRates.push_back(flipRate);
++                dispRates.push_back(dispRate);
 +                worstGaps.push_back(worstGapMs);
 +                rssValues.push_back(rss);
 +                cpuSum += cpu;
@@ -303,6 +312,7 @@ index 0000000..2b10636
 +            windowStart = now;
 +            startField = field;
 +            flips = 0;
++            dispChanges = 0;
 +            worstGapMs = 0.0;
 +            cpuStart = cpuNow;
 +            threadsStart = threadsNow;
@@ -313,16 +323,20 @@ index 0000000..2b10636
 +            std::fprintf(stderr, "[bench-summary] run ended inside the warmup: no summary\n");
 +            return;
 +        }
-+        double fieldSum = 0.0, flipSum = 0.0;
-+        for (double v : fieldRates)
-+            fieldSum += v;
-+        for (double v : flipRates)
-+            flipSum += v;
++        const auto mean = [](const std::vector<double> &v) {
++            double sum = 0.0;
++            for (double x : v)
++                sum += x;
++            return v.empty() ? 0.0 : sum / static_cast<double>(v.size());
++        };
 +        const double n = static_cast<double>(fieldRates.size());
++        // speed is the number that decides: below ~100% the game runs in slow motion (PS2 games step their logic per
++        // frame), it does not drop frames to keep up.
 +        std::fprintf(stderr,
-+                     "[bench-summary] seconds=%.0f fields/s avg=%.1f p5=%.1f | flips/s avg=%.1f p5=%.1f | worst gap p95=%.0fms max=%.0fms | cpu avg=%.0f%% | rss max=%.0fMB\n",
-+                     n, fieldSum / n, percentile(fieldRates, 0.05), flipSum / n, percentile(flipRates, 0.05),
-+                     percentile(worstGaps, 0.95), percentile(worstGaps, 1.0), cpuSum / n, percentile(rssValues, 1.0));
++                     "[bench-summary] seconds=%.0f speed avg=%.0f%% p5=%.0f%% | fields/s avg=%.1f | flips/s avg=%.1f p5=%.1f | disp/s avg=%.1f | worst gap p95=%.0fms max=%.0fms | cpu avg=%.0f%% | rss max=%.0fMB\n",
++                     n, 100.0 * mean(fieldRates) / 59.94, 100.0 * percentile(fieldRates, 0.05) / 59.94, mean(fieldRates),
++                     mean(flipRates), percentile(flipRates, 0.05), mean(dispRates), percentile(worstGaps, 0.95),
++                     percentile(worstGaps, 1.0), cpuSum / n, percentile(rssValues, 1.0));
 +    }
 +}
 diff --git a/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp b/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp

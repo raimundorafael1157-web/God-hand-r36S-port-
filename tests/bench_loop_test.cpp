@@ -1,5 +1,5 @@
 // Test of ps2x_bench::runLoop without the game: a fake runtime whose "game thread" advances the vsync tick at 60 Hz,
-// flips DISPFB1 every 2nd field (30 flips/s) and burns one core. Expected: fields/s ~60, flips/s ~30, cpu ~100%.
+// toggles DISPFB1.DBY every field and swaps DISPFB1.FBP every 2nd field (an interlaced 30 FPS game) and burns one core. Expected: fields/s ~60, speed ~100%, flips/s ~30, disp/s ~60, cpu ~100%.
 // Build from the repo root after scripts/setup_base.sh:
 //   c++ -std=c++20 -O2 -Isource/godhand-recomp/runtime/ps2xRuntime/src/lib tests/bench_loop_test.cpp -lpthread
 #include "ps2_bench.h"
@@ -35,8 +35,10 @@ int main()
             next += std::chrono::microseconds(16683);
             while (std::chrono::steady_clock::now() < next) {} // busy: one full core
             const uint64_t tick = runtime.mem.regs.vsyncTick.fetch_add(1) + 1;
-            if (tick % 2 == 0)
-                __atomic_store_n(&runtime.mem.regs.dispfb1, (tick / 2) % 2 ? 0x100u : 0x200u, __ATOMIC_RELAXED);
+            // Interlaced, 30 FPS game: DBY (bit 43) toggles every field, FBP (bits 0-8) swaps every 2nd field.
+            const uint64_t fbp = (tick / 2) % 2 ? 0x100u : 0x0C0u;
+            const uint64_t dby = static_cast<uint64_t>(tick % 2) << 43;
+            __atomic_store_n(&runtime.mem.regs.dispfb1, fbp | dby, __ATOMIC_RELAXED);
         }
     });
     const auto start = std::chrono::steady_clock::now();

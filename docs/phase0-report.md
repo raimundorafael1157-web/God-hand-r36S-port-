@@ -43,15 +43,34 @@ Sem medição. Serve só para decidir se vale gastar esforço na Fase 0.
 
 | Componente | Evidência | Estimativa no RK3326 | Confiança |
 | --- | --- | --- | --- |
-| EE recompilado + IOP + VU1 (CPU) | Celular: 42–58 campos/s em multidão; núcleo A35 ~1/10–1/15 do Cortex-X2 | ~3–8 campos/s em luta | Baixa (±3x) |
+| EE recompilado + IOP + VU1 (CPU) | Celular: 42–58 campos/s em multidão; núcleo A35 ~1/10–1/15 do Cortex-X2 (de memória, sem fonte) | ~3–8 campos/s em luta, ou seja, 5–15% de velocidade | Muito baixa (ver correção abaixo) |
 | GS, backend CPU do runtime | 1 FPS no título já no celular | Inviável | Alta |
 | GS, ponte PCSX2 sobre Vulkan | Precisa de Vulkan; falhou em Mali de celular | Provavelmente não abre na Mali-G31 | Média |
 | GS, renderizador GLES próprio | Funciona no celular, mas lento em jogo | Possível tecnicamente; desempenho desconhecido | Baixa |
 | RAM | 32 MB de RAM do PS2 + binário recompilado + caches; sem número publicado | Desconhecido; 1 GB é apertado | Baixa |
 | Áudio | SPU2 no modo mais barato já existe no port Android | Custo pequeno frente ao resto | Média |
 
-O número decisivo é o primeiro. Se a CPU não passar de ~20 campos/s com o GS desligado, nenhum renderizador salva
-o projeto. É isso que o caminho B mede em um dia.
+O número decisivo é o primeiro. É isso que o caminho B mede em um dia.
+
+### Correção (26/11): o critério certo é velocidade, não FPS
+
+A versão anterior dizia "se a CPU não passar de ~20 campos/s, é no-go". Estava errado, e otimista demais:
+
+- Um jogo de PS2 avança a lógica por quadro. Se o processador não dá conta, o jogo **fica em câmera lenta**; ele não
+  pula quadros para manter o ritmo. 20 campos/s seriam o jogo a um terço da velocidade, injogável.
+- Pular quadros só é possível no desenho, não na lógica. A medição com o GS nulo mede a lógica sozinha.
+- Então o critério, com o GS nulo, é `speed` (campos/s divididos por 59,94) perto de **100%** nas cenas pesadas.
+  Abaixo de ~90%, nenhum renderizador resolve. A meta "20 FPS" da seção 2 vale para quadros desenhados, e só depois
+  que a lógica roda a 100%.
+- Falta saber se o God Hand roda a 30 ou 60 quadros por segundo no PS2. A linha `[bench]` mostra isso
+  (`flips/s` a 100% de velocidade); o primeiro teste com o jogo no PC Linux responde.
+
+### Correção (26/11): a estimativa de 3–8 campos/s tem um furo de método
+
+Os 42–58 campos/s do celular são de cenas em que ele **já estava travado no limite de 60** ou perto dele, e com o
+GS ligado. Não dá para saber quanta folga de CPU o celular tinha, nem se o gargalo dele era a CPU. Dividir esse
+número pela diferença de CPU dá um intervalo sem base firme, nos dois sentidos. A medição direta é o único número
+que vale; a estimativa fica só como ordem de grandeza.
 
 ## Riscos principais
 
@@ -65,7 +84,7 @@ o projeto. É isso que o caminho B mede em um dia.
 Só fazem sentido se a medição sair go.
 
 1. Build Linux x86_64 a partir do fork Android (não do repositório Windows). Aceite: chega ao menu.
-2. Build ARM64 headless, GS desligado. Aceite: campos/s medidos no R36S, 5 cenas.
+2. Build ARM64 headless, GS desligado. Aceite: `speed` medido no R36S em 5 cenas; go só com ~100% nas pesadas.
 3. Executável mínimo SDL2 + GLES no R36S sem desktop: tela, controle, áudio, 256 MB alocados. Aceite: log e foto.
 4. Benchmark do renderizador GLES próprio com a carga medida no passo 2 da Fase 0. Aceite: tempo de quadro.
 5. RAM: RSS em 30 minutos, sem crescer. Aceite: gráfico de RSS.

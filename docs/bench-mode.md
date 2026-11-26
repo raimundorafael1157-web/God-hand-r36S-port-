@@ -10,7 +10,7 @@ Decidido em 25/11/2026: medir a CPU direto no aparelho com um build ARM64 sem te
 | Build ARM64 para o R36S | Feito | zig 0.17.1, alvo `aarch64-linux-gnu.2.30`, `-mcpu=cortex-a35` |
 | Compatível com ArkOS (glibc 2.30) | Feito | `objdump -T`: maior símbolo exigido é `GLIBC_2.30` |
 | Binário ARM64 inicia | Feito | qemu-aarch64: lê `godhand.ini`, recusa ISO ausente com a mensagem certa |
-| Módulo de medição | Feito | teste com jogo simulado no qemu: 60 campos/s, 30 flips/s, 100% CPU, como esperado |
+| Módulo de medição | Feito | teste com jogo simulado no qemu (entrelaçado, 30 FPS): 60 campos/s, 30 flips/s, 60 disp/s, 100% CPU, como esperado |
 | Rodar o jogo de verdade | **Não testado** | precisa do ISO |
 | Medição no aparelho | **Não feito** | precisa do R36S |
 
@@ -29,12 +29,16 @@ O repositório original fica intacto. `scripts/setup_base.sh` clona LasVola/godh
 
 ## O que a linha `[bench]` mostra
 
+Exemplo do formato (números ilustrativos, não medidos):
+
 ```
-[bench] t=42 fields/s=59.9 speed=100% flips/s=30.0 worst=35ms cpu=102% rss=410MB | GameThread=100% VUThread=12%
+[bench] t=42 fields/s=59.9 speed=100% flips/s=30.0 disp/s=59.9 worst=35ms cpu=102% rss=410MB mhz=1512 temp=58C | GameThread=100% VUThread=12%
 ```
 
 - `fields/s`: campos de vsync emulados por segundo. 59,94 = velocidade do PS2.
-- `flips/s`: trocas do buffer exibido. Num jogo com double buffer, é o FPS do próprio jogo.
+- `speed`: campos/s divididos por 59,94. **É o número que decide.** Abaixo de 100% o jogo fica em câmera lenta.
+- `flips/s`: trocas da página do buffer exibido (FBP). Num jogo com double buffer, é o FPS do próprio jogo.
+- `disp/s`: qualquer mudança no DISPFB, inclusive o deslocamento por campo de um jogo entrelaçado.
 - `worst`: maior intervalo entre dois flips no segundo.
 - `cpu`: 100% = um núcleo inteiro; 400% = os quatro núcleos.
 - `rss`: memória residente em MB.
@@ -48,6 +52,6 @@ No fim sai uma linha `[bench-summary]` com médias, percentil 5 e pior caso, sem
   carregarem no ARM64, o que ainda não foi testado.
 - **VU1 interpretado:** o código VU1 pré-compilado (`generated/vu1`) exige capturar os programas rodando o jogo.
   Sem ele, o VU1 roda interpretado, mais lento. A medição mostra quanto pesa (`VUThread`).
-- **GS nulo não é o jogo real:** mede só o que vem antes do renderizador. É o piso de custo: se nem isso chega a
-  20 quadros/s, nenhum renderizador resolve.
+- **GS nulo não é o jogo real:** mede só o que vem antes do renderizador. É o piso de custo. O critério é `speed`
+  perto de 100%: abaixo disso o jogo fica em câmera lenta, e nenhum renderizador resolve.
 - O renderizador GPU do projeto-base só existe para Windows (OpenGL desktop via WGL).
