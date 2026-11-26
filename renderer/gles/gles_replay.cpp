@@ -10,6 +10,9 @@
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_recording.h"
 
+#define XXH_INLINE_ALL
+#include "third_party/xxhash.h" // BSD-2-Clause, xxHash v0.8.2
+
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
 
@@ -60,12 +63,53 @@ int main(int argc, char **argv)
     {
         std::fprintf(stderr, "usage: gles_replay <recording.gsr> [--dump <dir>] [--dump-every <n>] [--fbp <hex>] "
                              "[--size <w>x<h>] [--repeat <n>] [--frames <n>]\n"
-                             "       gles_replay --gl-info   (the device's EGL/GLES: vendor, version, extensions)\n");
+                             "       gles_replay --gl-info   (the device's EGL/GLES: vendor, version, extensions)\n"
+                             "       gles_replay --hash-bench (page hash: current vs XXH3, on this CPU)\n");
         return 2;
     }
     // --gl-info: what the driver offers, for collect_hw_info.sh (no recording needed). Answers which driver the
     // firmware ships (ARM blob or Panfrost), whether the context comes from GBM, surfaceless or the default display,
     // and which extensions exist (EXT_buffer_storage, EXT_disjoint_timer_query...).
+    // --hash-bench: the renderer hashes 8 KB VRAM pages (~3.8 MB per frame in the stage 1 fight). Times the current hash
+    // and XXH3 on this CPU, so the R36S decides GLES_PAGE_HASH from its own numbers. No GL needed.
+    if (std::string(argv[1]) == "--hash-bench")
+    {
+        constexpr size_t kPages = 512, kPage = 8192;
+        std::vector<uint8_t> vram(kPages * kPage);
+        uint64_t x = 0x9E3779B97F4A7C15ull;
+        for (size_t i = 0; i < vram.size(); i += 8)
+        {
+            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+            std::memcpy(&vram[i], &x, 8);
+        }
+        const auto chain = [](const uint8_t *data, size_t size) {
+            uint64_t h = 0x7Eu ^ (size * 0x100000001B3ull);
+            for (size_t i = 0; i + 8 <= size; i += 8)
+            {
+                uint64_t w;
+                std::memcpy(&w, data + i, 8);
+                h = (h ^ w) * 0x100000001B3ull;
+                h ^= h >> 29;
+            }
+            return h;
+        };
+        for (int round = 0; round < 3; ++round)
+            for (int which = 0; which < 2; ++which)
+            {
+                uint64_t sink = 0;
+                constexpr int kPasses = 40;
+                const auto t0 = std::chrono::steady_clock::now();
+                for (int pass = 0; pass < kPasses; ++pass)
+                    for (size_t p = 0; p < kPages; ++p)
+                        sink ^= which == 0 ? chain(vram.data() + p * kPage, kPage) : XXH3_64bits(vram.data() + p * kPage, kPage);
+                const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                const double perPage = sec * 1e9 / (kPasses * kPages);
+                std::printf("[hash-bench] round %d %-8s %8.1f ns/page %6.2f GB/s -> %5.2f ms per frame at 3.8 MB (%llx)\n", round,
+                            which == 0 ? "current" : "xxh3", perPage, kPage / perPage, perPage * (3.8e6 / kPage) / 1e6,
+                            static_cast<unsigned long long>(sink & 0xF));
+            }
+        return 0;
+    }
     if (std::string(argv[1]) == "--gl-info")
     {
         gles::HeadlessContext context;

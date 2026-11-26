@@ -1,5 +1,8 @@
 #include "gs_gles_backend.h"
 
+#define XXH_INLINE_ALL
+#include "third_party/xxhash.h" // BSD-2-Clause, xxHash v0.8.2 (Yann Collet)
+
 #include "runtime/gs/gs_swizzle.h"
 
 #include <GLES3/gl3.h>
@@ -148,6 +151,22 @@ void main()
         {
             h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
             return h;
+        }
+
+        // GLES_PAGE_HASH=xxh3: XXH3 for the 8 KB page hashes instead of the simple multiply chain below. Off by
+        // default until the R36S says it pays (gles_replay --hash-bench): 3.6-4x faster on an x86 PC, unknown on the
+        // Cortex-A35. Either only decides "did these bytes change?", so the picture is the same.
+        bool useXxh3()
+        {
+            static const bool on = [] { const char *v = std::getenv("GLES_PAGE_HASH"); return v && std::string(v) == "xxh3"; }();
+            return on;
+        }
+
+        uint64_t hashBytes(const uint8_t *data, size_t size, uint64_t seed);
+
+        uint64_t pageHash(const uint8_t *page)
+        {
+            return useXxh3() ? XXH3_64bits(page, 8192u) : hashBytes(page, 8192u, 0x7Eu);
         }
 
         uint64_t hashBytes(const uint8_t *data, size_t size, uint64_t seed)
@@ -667,7 +686,7 @@ void main()
         {
             if (m_pageHashGen[p] != m_pageGen[p])
             {
-                m_pageHash[p] = hashBytes(m_vram + static_cast<size_t>(p) * 8192u, 8192u, 0x7Eu);
+                m_pageHash[p] = pageHash(m_vram + static_cast<size_t>(p) * 8192u);
                 m_pageHashGen[p] = m_pageGen[p];
                 m_stats.hashedBytes += 8192u;
             }
