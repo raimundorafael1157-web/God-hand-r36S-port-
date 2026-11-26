@@ -1,8 +1,18 @@
 diff --git a/runtime/ps2xIOP/src/iop_subsystem.cpp b/runtime/ps2xIOP/src/iop_subsystem.cpp
-index 421ae7c..5e8cc20 100644
+index 421ae7c..2414e1c 100644
 --- a/runtime/ps2xIOP/src/iop_subsystem.cpp
 +++ b/runtime/ps2xIOP/src/iop_subsystem.cpp
-@@ -34,6 +34,9 @@
+@@ -10,6 +10,9 @@
+ #include <chrono>
+ #include <condition_variable>
+ #include <cstdlib>
++#if defined(__linux__)
++#include <pthread.h>
++#endif
+ #include <cstring>
+ #include <map>
+ #include <mutex>
+@@ -34,6 +37,9 @@
  #if defined(_M_X64) || defined(__x86_64__)
  #include <immintrin.h>
  #define PS2X_IOP_SPIN_PAUSE() _mm_pause()
@@ -12,7 +22,17 @@ index 421ae7c..5e8cc20 100644
  #else
  #define PS2X_IOP_SPIN_PAUSE() std::this_thread::yield()
  #endif
-@@ -434,7 +437,16 @@ namespace ps2x::iop
+@@ -403,6 +409,9 @@ namespace ps2x::iop
+             t_onIopWorker = true;
+ #if defined(_WIN32)
+             SetThreadDescription(GetCurrentThread(), L"IOPThread"); // shows up in profilers (URBAN_NATIVE_PROFILE, F6)
++#elif defined(__linux__)
++            // RK3326 port: otherwise it keeps the EE thread's name and the bench lists two "GameThread"s.
++            pthread_setname_np(pthread_self(), "IOPThread");
+ #endif
+ #if defined(_WIN32)
+             if (!iopWaitPolicy().spinOnly)
+@@ -434,7 +443,16 @@ namespace ps2x::iop
                      if (++spins < 1024u)
                          continue;
                      spins = 0u;

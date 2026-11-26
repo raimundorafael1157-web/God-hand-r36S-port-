@@ -1,8 +1,8 @@
 diff --git a/runtime/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/runtime/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
-index 5879cff..fe99008 100644
+index 5879cff..0cf9c8c 100644
 --- a/runtime/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
 +++ b/runtime/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
-@@ -152,8 +152,52 @@ GSThreadedBackend::~GSThreadedBackend()
+@@ -152,8 +152,51 @@ GSThreadedBackend::~GSThreadedBackend()
          m_worker.join();
  }
  
@@ -17,7 +17,7 @@ index 5879cff..fe99008 100644
 +    public:
 +        void Initialize(uint8_t *vram, uint32_t vramSize) override { m_cpu.Initialize(vram, vramSize); }
 +        void Reset() override { m_cpu.Reset(); }
-+        void Submit(const GSPrimitiveBatch &) override { m_batches.fetch_add(1u, std::memory_order_relaxed); }
++        void Submit(const GSPrimitiveBatch &) override {}
 +        void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) override { m_cpu.LoadClut(tex0, texclut); }
 +        void BeginTransfer(const GSTransferCommand &command) override { m_cpu.BeginTransfer(command); }
 +        void UploadImage(const uint8_t *data, uint32_t sizeBytes) override { m_cpu.UploadImage(data, sizeBytes); }
@@ -34,7 +34,6 @@ index 5879cff..fe99008 100644
 +
 +    private:
 +        GSCpuBackend m_cpu;
-+        std::atomic<uint64_t> m_batches{0u};
 +    };
 +}
 +
@@ -57,10 +56,10 @@ index 5879cff..fe99008 100644
      const char *gpu = std::getenv("PS2X_GS_GPU");
 diff --git a/runtime/ps2xRuntime/src/lib/ps2_bench.h b/runtime/ps2xRuntime/src/lib/ps2_bench.h
 new file mode 100644
-index 0000000..842f82d
+index 0000000..10f2e02
 --- /dev/null
 +++ b/runtime/ps2xRuntime/src/lib/ps2_bench.h
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,307 @@
 +#pragma once
 +// RK3326 port: the measurement loop of PS2X_BENCH=1 (ps2_runtime.cpp, PS2Runtime::run). It replaces the present loop
 +// when there is no window: nothing is drawn, the game thread runs exactly as in a normal run, and this thread only
@@ -300,7 +299,11 @@ index 0000000..842f82d
 +            const double flipRate = static_cast<double>(flips) / seconds;
 +            const double dispRate = static_cast<double>(dispChanges) / seconds;
 +            const double frameRate = static_cast<double>(lastFrames - windowFrames) / seconds;
-+            const double worstMs = lastFrames != 0u ? worstFrameMs : worstGapMs;
++            // A second with no new frame at all is the worst case, not a 0 ms one: count the time since the last frame.
++            const double sinceFrameMs = std::chrono::duration<double, std::milli>(now - lastFrame).count();
++            const double worstMs = lastFrames != 0u ? std::max(worstFrameMs, sinceFrameMs) : worstGapMs;
++            // A save state load moves the field counter (forward or back) in one go: that second is not a speed.
++            const bool jump = field < startField || fieldRate > 125.0;
 +            const double cpu = 100.0 * (cpuNow - cpuStart) / seconds;
 +            const double rss = rssMegabytes();
 +            const double t = std::chrono::duration<double>(now - start).count();
@@ -317,11 +320,11 @@ index 0000000..842f82d
 +                std::snprintf(part, sizeof(part), " %s=%.0f%%", sample.name.c_str(), share);
 +                threadText += part;
 +            }
-+            std::fprintf(stderr, "[bench] t=%.0f fields/s=%.1f speed=%.0f%% frames/s=%.1f flips/s=%.1f disp/s=%.1f worst=%.0fms cpu=%.0f%% rss=%.0fMB mhz=%d temp=%dC |%s\n",
-+                         t, fieldRate, 100.0 * fieldRate / 59.94, frameRate, flipRate, dispRate, worstMs, cpu, rss, cpuMhz(), hottestC(), threadText.c_str());
++            std::fprintf(stderr, "[bench]%s t=%.0f fields/s=%.1f speed=%.0f%% frames/s=%.1f flips/s=%.1f disp/s=%.1f worst=%.0fms cpu=%.0f%% rss=%.0fMB mhz=%d temp=%dC |%s\n",
++                         jump ? " (state load, left out)" : "", t, fieldRate, 100.0 * fieldRate / 59.94, frameRate, flipRate, dispRate, worstMs, cpu, rss, cpuMhz(), hottestC(), threadText.c_str());
 +
 +            onSecond(t);
-+            if (t >= warmup)
++            if (t >= warmup && !jump)
 +            {
 +                fieldRates.push_back(fieldRate);
 +                flipRates.push_back(flipRate);

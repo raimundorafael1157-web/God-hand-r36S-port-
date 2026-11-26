@@ -47,3 +47,17 @@ A luta precisa de ~1 núcleo inteiro deste Xeon para ficar perto de 100%. Um Cor
 ordem e é, por estimativa de memória e sem fonte, de 5 a 8 vezes mais lento por núcleo que este Xeon. Se for isso,
 a luta rodaria a algo como 12–20% da velocidade no R36S, só com a lógica, antes de qualquer renderizador. Isso
 apontaria para no-go no caminho atual. Só a medição no aparelho confirma ou derruba.
+
+## Revisão crítica do código (26/11, manhã)
+
+| Problema | Gravidade | Correção |
+| --- | --- | --- |
+| `setup_base.sh` rodado de novo apagaria `build-host`, `build-x64` e `build-rk3326` (horas de compilação) | Alta | A limpeza preserva `build*` |
+| `pip install --user` é recusado no Ubuntu 23.04+ (PEP 668): o build no WSL pararia | Alta | Tenta de novo com `--break-system-packages` (só afeta a pasta do usuário) |
+| Biblioteca gráfica faltando no aparelho impediria o programa de abrir, mesmo sem desenhar | Média | Bibliotecas vazias em `stubs/`, usadas só quando falta alguma. Testado: a luta roda só com elas |
+| O segundo do carregamento do save state aparecia como ~7800% de velocidade | Média | Marcado "(state load, left out)" e fora do resumo |
+| Um segundo inteiro sem quadro novo mostrava "worst=0ms" | Média | Conta o tempo desde o último quadro |
+| `make_sysroot.sh` quebraria o `apt update` no Ubuntu 22.04 | Média | Restringe também o `sources.list` antigo a amd64 |
+| Teste do módulo de medição não compilava desde o contador de quadros | Média | Atualizado e conferindo quadros e pior intervalo |
+| Duas threads com o nome "GameThread" no log (a do IOP herdava o nome) | Baixa | A do IOP se chama `IOPThread` |
+| Contador sem uso no GS nulo | Baixa | Removido |

@@ -9,8 +9,14 @@ if ! dpkg --print-foreign-architectures | grep -q arm64; then
     sudo dpkg --add-architecture arm64
     . /etc/os-release
     echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $VERSION_CODENAME main universe" | sudo tee /etc/apt/sources.list.d/rk3326-arm64.list
-    # Keep the regular mirrors amd64-only so apt does not look for arm64 packages there.
-    sudo sed -i 's/^Types: deb$/Types: deb\nArchitectures: amd64/' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+    # Keep the regular mirrors amd64-only so apt does not look for arm64 packages there (they only serve amd64):
+    # Ubuntu 24.04 keeps them in ubuntu.sources, 22.04 and older in sources.list.
+    if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+        sudo sed -i 's/^Types: deb$/Types: deb\nArchitectures: amd64/' /etc/apt/sources.list.d/ubuntu.sources
+    fi
+    if [ -f /etc/apt/sources.list ]; then
+        sudo sed -i -E 's/^deb (https?:)/deb [arch=amd64] \1/' /etc/apt/sources.list
+    fi
     sudo apt-get update
 fi
 cd "$WORK"

@@ -17,7 +17,8 @@ fi
 cd "$DEST"
 git fetch --depth 1 origin "$BASE_COMMIT" 2>/dev/null || git fetch origin
 git checkout -q --force "$BASE_COMMIT"
-git clean -qfd -e game -e generated -e generated_modules -e build -e out
+# Keeps the game-derived folders and every build tree (build-host, build-x64, build-rk3326: hours of compiling).
+git clean -qfd -e game -e generated -e generated_modules -e 'build*' -e out
 for patch in "$REPO"/patches/*.patch; do
     echo "applying $(basename "$patch")"
     git apply --whitespace=nowarn "$patch"

@@ -55,7 +55,14 @@ tests/      teste do módulo de medição
 
 ## Compilar
 
-Num Linux x86_64 (ou WSL no Windows), com `cmake`, `ninja`, `g++`, `python3` e `git`:
+Num Linux x86_64 (ou WSL no Windows). No Ubuntu:
+
+```sh
+sudo apt install -y cmake ninja-build g++ python3-pip git curl binutils-aarch64-linux-gnu \
+    libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl-dev libasound2-dev
+```
+
+Depois:
 
 ```sh
 ./scripts/setup_base.sh                                   # baixa a base e aplica os patches

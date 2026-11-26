@@ -55,10 +55,18 @@ if [ -n "$STATE" ]; then
 fi
 
 # The binary links libEGL/libGLESv2/libgbm/libdrm even when it draws nothing: a missing one stops it before main.
+# If only those are missing, the empty ones in stubs/ (scripts/make_gl_stubs.sh) stand in: the bench never calls them.
 if command -v ldd >/dev/null 2>&1; then
     { echo "== ldd"; ldd "$DIR/godhand"; } >> "$LOG" 2>&1
-    if ldd "$DIR/godhand" 2>&1 | grep -q "not found"; then
-        echo "missing libraries (see $LOG):"; ldd "$DIR/godhand" | grep "not found"; exit 1
+    MISSING=$(ldd "$DIR/godhand" 2>&1 | awk '/not found/ {print $1}')
+    if [ -n "$MISSING" ]; then
+        OTHER=$(echo "$MISSING" | grep -vE '^(libEGL\.so\.1|libGLESv2\.so\.2|libgbm\.so\.1|libdrm\.so\.2)$' || true)
+        if [ -z "$OTHER" ] && [ -d "$DIR/stubs" ]; then
+            echo "graphics libraries missing ($(echo $MISSING)): using the empty ones in stubs/ (fine for the bench)" | tee -a "$LOG"
+            export LD_LIBRARY_PATH="$DIR/stubs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        else
+            echo "missing libraries (see $LOG):"; echo "$MISSING"; exit 1
+        fi
     fi
 fi
 

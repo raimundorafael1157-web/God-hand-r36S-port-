@@ -71,7 +71,10 @@ state)
     ;;
 build)
     [ -f generated/register_functions.cpp ] || { echo "no generated code: run 'build_rk3326.sh generate <iso>' first"; exit 1; }
-    python3 -m ziglang version >/dev/null 2>&1 || python3 -m pip install --user ziglang==0.17.1
+    # Ubuntu 23.04+ refuses a plain --user install (PEP 668, "externally managed"); a --user install does not touch
+    # the system packages, so it is allowed explicitly when the plain one is refused.
+    python3 -m ziglang version >/dev/null 2>&1 || python3 -m pip install --user ziglang==0.17.1 \
+        || python3 -m pip install --user --break-system-packages ziglang==0.17.1
     export RK3326_SYSROOT=${RK3326_SYSROOT:-$REPO/source/rk3326-sysroot}
     [ -d "$RK3326_SYSROOT" ] || "$REPO/scripts/make_sysroot.sh" "$RK3326_SYSROOT"
     cmake -S . -B build-rk3326 -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-zig-glibc230.cmake -DCMAKE_BUILD_TYPE=Release \
@@ -86,6 +89,7 @@ build)
         cp build-rk3326/bin/godhand "$REPO/builds/rk3326/godhand"
     fi
     cp "$REPO/scripts/run_bench.sh" "$REPO/scripts/collect_hw_info.sh" "$REPO/builds/rk3326/"
+    "$REPO/scripts/make_gl_stubs.sh" "$REPO/builds/rk3326/godhand" "$REPO/builds/rk3326/stubs"
     echo "binary: $REPO/builds/rk3326/godhand"
     ;;
 *)
