@@ -6,6 +6,11 @@
 #   sh run_bench.sh /caminho/para/God\ Hand\ (USA).iso [modo] [segundos] [save-state]
 # modo: cpu (default) = nothing is drawn, measures EE + VU1 + IOP + GS front end only (PS2X_GS_NULL=1)
 #       swgs          = the runtime's software GS draws every frame (its cost on top, still no screen)
+# Optional (environment, all off by default; the plain run is unchanged):
+#   PS2X_PROF=1      GameThread time by subsystem (ee, vu1, iop, dispatch, sched, gif, vif, idle, gs-wait): [bench-sections]
+#   PS2X_PIN=auto    pins GameThread/IOPThread/GSThread to cores 3/2/1 (or PS2X_PIN=GameThread:3,IOPThread:2,...)
+#   PS2X_GAME_NICE=-5  raises the GameThread's priority (needs root)
+# Long thermal run: sh run_bench.sh <iso> cpu 900 stage1.state  ([bench-thermal] compares the first and last minute).
 # Writes bench-<modo>-<date>.log next to this script. Send that file back. The only system change is the clock
 # governors set to "performance" for the run and put back afterwards (PERF=0 skips it).
 set -u
@@ -21,7 +26,7 @@ LOG="$DIR/bench-$MODE-$(date +%Y%m%d-%H%M%S).log"
     echo "== device"; uname -a; cat /proc/device-tree/model 2>/dev/null; echo
     for c in /sys/devices/system/cpu/cpu[0-9]*; do echo "$c $(cat $c/cpufreq/scaling_governor 2>/dev/null) $(cat $c/cpufreq/scaling_cur_freq 2>/dev/null)"; done
     for z in /sys/class/thermal/thermal_zone*; do echo "$z $(cat $z/temp 2>/dev/null)"; done
-    free -m; echo "== iso"; ls -l "$ISO"; echo "== mode $MODE, $SECONDS_LIMIT s, state '${STATE}', pad '${PS2X_PAD_SCRIPT-default}', iop spin '${PS2X_IOP_SPIN_US:-2000}'"
+    free -m; echo "== iso"; ls -l "$ISO"; echo "== mode $MODE, $SECONDS_LIMIT s, state '${STATE}', pad '${PS2X_PAD_SCRIPT-default}', iop spin '${PS2X_IOP_SPIN_US:-2000}', prof '${PS2X_PROF:-0}', pin '${PS2X_PIN:-off}'"
 } > "$LOG" 2>&1
 
 # Clocks: like the RK3326 ports that run well (Super Mario Strikers, NFSU2), lock CPU, GPU and memory controller to

@@ -1,0 +1,1098 @@
+diff --git a/runtime/ps2xIOP/src/iop_subsystem.cpp b/runtime/ps2xIOP/src/iop_subsystem.cpp
+index 2414e1c..b478fc5 100644
+--- a/runtime/ps2xIOP/src/iop_subsystem.cpp
++++ b/runtime/ps2xIOP/src/iop_subsystem.cpp
+@@ -1,4 +1,5 @@
+ #include "ps2x/iop/iop_subsystem.h"
++#include "../../ps2xRuntime/include/ps2_prof.h" // RK3326 port: GameThread section markers (bench)
+ 
+ #include "iop_service.h"
+ #include "iop_module_manager.h"
+@@ -652,6 +653,7 @@ namespace ps2x::iop
+ 
+     void IopSubsystem::runEeCycles(uint64_t eeCycles) noexcept
+     {
++        const ps2x_prof::Scope profScope(ps2x_prof::IOP);
+         if (iopThreadEnabled())
+         {
+             m_impl->runEeCyclesAsync(eeCycles);
+diff --git a/runtime/ps2xRuntime/include/ps2_prof.h b/runtime/ps2xRuntime/include/ps2_prof.h
+new file mode 100644
+index 0000000..0f4cfb9
+--- /dev/null
++++ b/runtime/ps2xRuntime/include/ps2_prof.h
+@@ -0,0 +1,383 @@
++#pragma once
++// RK3326 port: where the GameThread spends its time, measured with the CPU's own counter. The GameThread runs the
++// recompiled EE code and, inline, the VU1 microprograms, part of the IOP, the scheduler and the GS/VIF front end: one
++// CPU-time number per thread does not say which of them is the bottleneck.
++//
++// Each subsystem entry point switches the GameThread's current section. A switch reads the counter (CNTVCT_EL0 on
++// ARM64, the TSC on x86-64), adds the time since the previous switch to the section being left, and records the new
++// one: exclusive time, so a VU1 microprogram started from EE code counts as vu1, not ee, and the sections add up to the
++// thread's wall time. Waiting is a section too: idle = the EE has nothing due yet or is ahead of real time (pacing);
++// gs-wait = blocked on the GS thread's queue.
++//
++// dispatch and sched are entered millions of times per second: timing every entry cost ~45% of the GameThread on the
++// PC. They are sampled instead (SampledScope): every call is counted, one in kSampleEvery on average is timed (picked
++// pseudo-randomly), and the total is
++// the timed share scaled by calls / timed calls. Their time is first charged to the section they ran inside (ee, as a
++// rule) and the report moves the estimate out of it, so the sections still add up to wall time.
++//
++// Nothing here changes what the emulator does: no branch of EE, VU, IOP, GS or scheduler logic looks at these values.
++// Off unless PS2X_PROF=1 together with PS2X_BENCH=1, decided once when the GameThread starts, so the plain benchmark
++// measures what it always did; off, a marker is one thread-local flag test. Other threads never count. ps2_bench.h reads the totals once per second.
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++
++#if defined(__x86_64__) || defined(_M_X64)
++#include <x86intrin.h>
++#endif
++
++namespace ps2x_prof
++{
++    enum Section : uint8_t
++    {
++        EE = 0,    // recompiled EE code and everything not marked below
++        VU1,       // VU1 microprograms (pre-compiled blocks or interpreter)
++        VU0,       // VU0 microprograms (macro mode is EE code)
++        IOP,       // IOP emulation entered from the GameThread
++        Dispatch,  // jumps and calls between recompiled functions (lookup, bookkeeping)
++        Sched,     // EE scheduler: full checkpoint path and cycle accounting
++        Gif,       // GIF packets: GS register writes, vertex kicks
++        Vif,       // VIF1 data: unpacks into VU1 memory
++        Idle,      // scheduler waits: nothing due yet, or the EE ahead of real time (spare time)
++        GsWait,    // blocked on the GS thread (queue full, drain)
++        Count
++    };
++
++    inline const char *const kNames[Count] = {"ee", "vu1", "vu0", "iop", "dispatch", "sched", "gif", "vif", "idle", "gs-wait"};
++
++    // The counter: CNTVCT_EL0 (ARM generic timer, 24 MHz on the RK3326), the TSC on x86-64, else steady_clock in ns.
++    inline uint64_t ticks()
++    {
++#if defined(__aarch64__)
++        uint64_t v;
++        asm volatile("mrs %0, cntvct_el0" : "=r"(v));
++        return v;
++#elif defined(__x86_64__) || defined(_M_X64)
++        return __rdtsc();
++#else
++        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                                         std::chrono::steady_clock::now().time_since_epoch())
++                                         .count());
++#endif
++    }
++
++    // Ticks per second when the hardware says so (CNTFRQ_EL0); 0 = calibrate against steady_clock (x86 TSC).
++    inline uint64_t ticksPerSecondFromHardware()
++    {
++#if defined(__aarch64__)
++        uint64_t f;
++        asm volatile("mrs %0, cntfrq_el0" : "=r"(f));
++        return f;
++#elif defined(__x86_64__) || defined(_M_X64)
++        return 0;
++#else
++        return 1000000000ull;
++#endif
++    }
++
++    // Written by the GameThread only (plain load + store, no read-modify-write), read by the bench thread.
++    struct Counters
++    {
++        std::atomic<uint64_t> ticks[Count];
++        std::atomic<uint64_t> switches{0};
++        std::atomic<uint64_t> lastStamp{0};   // when the current section started
++        std::atomic<uint8_t> current{EE};
++        std::atomic<bool> active{false};
++        Counters()
++        {
++            for (auto &t : ticks)
++                t.store(0, std::memory_order_relaxed);
++        }
++    };
++
++    inline Counters g_game;
++
++    constexpr uint32_t kSampleEvery = 128; // power of two
++
++    // Sampled sections (dispatch, sched): calls, timed calls, and the timed ticks split by the section they ran inside.
++    struct SampledCounters
++    {
++        std::atomic<uint64_t> calls[Count];
++        std::atomic<uint64_t> timed[Count];
++        std::atomic<uint64_t> ticksInside[Count][Count]; // [sampled section][section it ran inside]
++        std::atomic<uint64_t> intervalsInside[Count][Count]; // timed stretches behind those ticks (bias correction)
++        SampledCounters()
++        {
++            for (int i = 0; i < Count; ++i)
++            {
++                calls[i].store(0, std::memory_order_relaxed);
++                timed[i].store(0, std::memory_order_relaxed);
++                for (int j = 0; j < Count; ++j)
++                {
++                    ticksInside[i][j].store(0, std::memory_order_relaxed);
++                    intervalsInside[i][j].store(0, std::memory_order_relaxed);
++                }
++            }
++        }
++    };
++    inline SampledCounters g_sampled;
++
++    inline void bump(std::atomic<uint64_t> &a, uint64_t v) { a.store(a.load(std::memory_order_relaxed) + v, std::memory_order_relaxed); }
++
++    struct SampledScope;
++    struct ThreadState
++    {
++        bool counting = false;
++        uint8_t current = EE;
++        uint64_t last = 0;
++        uint32_t sampleState = 0x9E3779B9u; // xorshift32: which calls are timed
++        uint8_t sampledInside = Count;      // innermost sampled section we are in (Count = none)
++        SampledScope *timing = nullptr; // innermost sampled scope being timed
++    };
++    inline thread_local ThreadState t_state;
++
++    // The whole cost of one switch; ps2_bench.h times it on its own thread to report the overhead.
++    inline void account(Counters &c, ThreadState &s, uint8_t next)
++    {
++        const uint64_t now = ticks();
++        const uint8_t cur = s.current;
++        c.ticks[cur].store(c.ticks[cur].load(std::memory_order_relaxed) + (now - s.last), std::memory_order_relaxed);
++        s.last = now;
++        s.current = next;
++        c.lastStamp.store(now, std::memory_order_relaxed);
++        c.current.store(next, std::memory_order_relaxed);
++        c.switches.store(c.switches.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed);
++    }
++
++    inline bool enabledByEnvironment()
++    {
++        const char *bench = std::getenv("PS2X_BENCH");
++        const char *prof = std::getenv("PS2X_PROF");
++        return bench && std::strcmp(bench, "1") == 0 && prof && std::strcmp(prof, "1") == 0;
++    }
++
++    // Called once, first thing on the GameThread.
++    inline void registerGameThread()
++    {
++        if (!enabledByEnvironment())
++            return;
++        t_state.counting = true;
++        t_state.current = EE;
++        t_state.last = ticks();
++        g_game.lastStamp.store(t_state.last, std::memory_order_relaxed);
++        g_game.current.store(EE, std::memory_order_relaxed);
++        g_game.active.store(true, std::memory_order_release);
++    }
++
++    inline uint8_t current() { return t_state.current; }
++
++    inline void set(uint8_t section)
++    {
++        if (t_state.counting && section != t_state.current)
++            account(g_game, t_state, section);
++    }
++
++
++    // A dispatch or sched entry. Every call is counted; one in kSampleEvery on average is timed, picked pseudo-randomly
++    // and independently of any enclosing marker (forcing nested markers to time as well charged their own cost to the
++    // parent, x128). A timed stretch is charged to the section it ran inside: the enclosing sampled section if there is
++    // one (sched inside dispatch), else the exact section; combine() moves the estimates out in that order.
++    // pause()/resume() leave out a stretch that belongs elsewhere (the call into the target function, for dispatch).
++    struct SampledScope
++    {
++        SampledScope *parent = nullptr;   // enclosing timed scope (for exact sections to pause)
++        uint64_t start = 0, spent = 0;
++        uint32_t intervals = 0;           // timed stretches: each carries one counter read of bias
++        uint8_t section = 0, inside = 0, previousInside = Count;
++        bool counting = false, timed = false, paused = false;
++        bool exactPaused = false;         // paused by an exact section (Scope) running inside us
++
++        explicit SampledScope(uint8_t s)
++        {
++            ThreadState &t = t_state;
++            if (!t.counting)
++                return;
++            counting = true;
++            section = s;
++            previousInside = t.sampledInside;
++            inside = t.sampledInside != Count ? t.sampledInside : t.current;
++            t.sampledInside = s;
++            bump(g_sampled.calls[s], 1u);
++            // Not every Nth call: calls come in regular patterns (a dispatch, then a checkpoint, ...) and a fixed
++            // stride would time the same kind of call every time.
++            uint32_t x = t.sampleState;
++            x ^= x << 13;
++            x ^= x >> 17;
++            x ^= x << 5;
++            t.sampleState = x;
++            if ((x & (kSampleEvery - 1u)) != 0u)
++                return;
++            timed = true;
++            parent = t.timing;
++            t.timing = this;
++            start = ticks();
++        }
++        void stopClock()
++        {
++            if (timed && !paused)
++            {
++                spent += ticks() - start;
++                ++intervals;
++                paused = true;
++            }
++        }
++        void startClock()
++        {
++            if (timed && paused)
++            {
++                start = ticks();
++                paused = false;
++            }
++        }
++        void pause()
++        {
++            if (!counting)
++                return;
++            stopClock();
++            t_state.sampledInside = previousInside; // the target function runs in its caller's section
++        }
++        void resume()
++        {
++            if (!counting)
++                return;
++            t_state.sampledInside = section;
++            startClock();
++        }
++        ~SampledScope()
++        {
++            if (!counting)
++                return;
++            t_state.sampledInside = previousInside;
++            if (!timed)
++                return;
++            stopClock();
++            bump(g_sampled.timed[section], 1u);
++            bump(g_sampled.ticksInside[section][inside], spent);
++            bump(g_sampled.intervalsInside[section][inside], intervals);
++            t_state.timing = parent;
++        }
++        SampledScope(const SampledScope &) = delete;
++        SampledScope &operator=(const SampledScope &) = delete;
++    };
++
++    // An exact section (vu1, iop, gif, vif, idle, gs-wait...). Its time is its own: the clocks of the timed sampled
++    // scopes it runs inside stop meanwhile (the EE pacing wait, for one, sits inside the checkpoint path of a dispatch),
++    // and sampled markers inside it are charged to it, not to the dispatch around it.
++    struct Scope
++    {
++        uint8_t previous;
++        uint8_t previousInside = Count;
++        bool pausedSampled = false;
++        explicit Scope(uint8_t section) : previous(t_state.current)
++        {
++            ThreadState &t = t_state;
++            if (t.counting)
++            {
++                for (SampledScope *p = t.timing; p; p = p->parent)
++                    if (!p->paused)
++                    {
++                        p->stopClock();
++                        p->exactPaused = true;
++                        pausedSampled = true;
++                    }
++                previousInside = t.sampledInside;
++                t.sampledInside = Count;
++            }
++            set(section);
++        }
++        ~Scope()
++        {
++            set(previous);
++            ThreadState &t = t_state;
++            if (!t.counting)
++                return;
++            t.sampledInside = previousInside;
++            if (pausedSampled)
++                for (SampledScope *p = t.timing; p; p = p->parent)
++                    if (p->exactPaused)
++                    {
++                        p->exactPaused = false;
++                        p->startClock();
++                    }
++        }
++        Scope(const Scope &) = delete;
++        Scope &operator=(const Scope &) = delete;
++    };
++
++    // Totals so far, the running section included (bench thread). Approximate by at most one section switch.
++    inline void snapshot(uint64_t out[Count], uint64_t &switches)
++    {
++        for (int i = 0; i < Count; ++i)
++            out[i] = g_game.ticks[i].load(std::memory_order_relaxed);
++        switches = g_game.switches.load(std::memory_order_relaxed);
++        if (!g_game.active.load(std::memory_order_acquire))
++            return;
++        const uint64_t since = g_game.lastStamp.load(std::memory_order_relaxed);
++        const uint8_t cur = g_game.current.load(std::memory_order_relaxed);
++        const uint64_t now = ticks();
++        if (now > since && cur < Count)
++            out[cur] += now - since;
++    }
++
++    // Sampled sections' raw counters (bench thread): calls, timed calls, timed ticks by the section they ran inside.
++    struct SampledSnapshot
++    {
++        uint64_t calls[Count] = {}, timed[Count] = {}, inside[Count][Count] = {}, intervals[Count][Count] = {};
++    };
++    inline SampledSnapshot sampledSnapshot()
++    {
++        SampledSnapshot s;
++        for (int i = 0; i < Count; ++i)
++        {
++            s.calls[i] = g_sampled.calls[i].load(std::memory_order_relaxed);
++            s.timed[i] = g_sampled.timed[i].load(std::memory_order_relaxed);
++            for (int j = 0; j < Count; ++j)
++            {
++                s.inside[i][j] = g_sampled.ticksInside[i][j].load(std::memory_order_relaxed);
++                s.intervals[i][j] = g_sampled.intervalsInside[i][j].load(std::memory_order_relaxed);
++            }
++        }
++        return s;
++    }
++
++    // What a timed stretch measures when it holds no work at all: the cost of the counter read that closes it, in ticks
++    // (the average of back-to-back reads; a fraction of a tick with the RK3326's 24 MHz counter). Subtracted from every
++    // timed stretch: dispatch calls last tens of ns, and this bias alone made dispatch read ~2x its real time on the PC.
++    inline double emptyIntervalTicks()
++    {
++        constexpr int kReads = 1000000;
++        uint64_t sum = 0;
++        for (int i = 0; i < kReads; ++i)
++        {
++            const uint64_t a = ticks();
++            const uint64_t b = ticks();
++            sum += b - a;
++        }
++        return static_cast<double>(sum) / kReads;
++    }
++
++    // Exact section ticks over a window plus the sampled sections' scaled estimates: the estimates are moved out of the
++    // sections they ran inside. Inputs are window deltas; out[] adds up to the same total as exact[].
++    inline void combine(const uint64_t exact[Count], const SampledSnapshot &d, double intervalBias, double out[Count])
++    {
++        for (int i = 0; i < Count; ++i)
++            out[i] = static_cast<double>(exact[i]);
++        for (int s = 0; s < Count; ++s)
++        {
++            if (d.timed[s] == 0u)
++                continue;
++            const double scale = static_cast<double>(d.calls[s]) / static_cast<double>(d.timed[s]);
++            for (int p = 0; p < Count; ++p)
++            {
++                const double own = std::max(0.0, static_cast<double>(d.inside[s][p]) - static_cast<double>(d.intervals[s][p]) * intervalBias);
++                const double moved = std::min(out[p], own * scale);
++                out[p] -= moved;
++                out[s] += moved;
++            }
++        }
++    }
++}
+diff --git a/runtime/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/runtime/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 3395255..b2fdf26 100644
+--- a/runtime/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/runtime/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/ee_scheduler.h"
++#include "ps2_prof.h" // RK3326 port: GameThread section markers (bench)
+ 
+ #include "ps2_log.h"
+ #include "ps2_runtime_macros.h"
+@@ -779,6 +780,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
+             g_ps2xEeDeferBudget.store(g_deferUntil - m_eeCycle, std::memory_order_relaxed);
+         return false;
+     }
++    ps2x_prof::SampledScope profScope(ps2x_prof::Sched); // the full path only
+     t_onEeThread = true; // the full path runs before any deferral (g_deferUntil starts at 0)
+     accountCycles(static_cast<uint32_t>(charge)); // also accounts g_ps2xEeDeferred
+     const bool due = [this]() noexcept -> bool
+@@ -853,6 +855,7 @@ void ps2xEeFlushDeferredCycles() noexcept
+ 
+ void EeScheduler::accountCycles(uint32_t cycles) noexcept
+ {
++    ps2x_prof::SampledScope profScope(ps2x_prof::Sched);
+     // Cycles checkpointDue deferred are accounted with these (a flush passes 0 for them alone).
+     uint64_t elapsed = (cycles == 0u && g_ps2xEeDeferred != 0u) ? 0u : std::max<uint64_t>(1u, cycles);
+     elapsed += g_ps2xEeDeferred;
+@@ -2626,9 +2629,12 @@ void EeScheduler::processDueDeadlines()
+                 const bool gsBefore = gsInterruptUnseen();
+                 const auto sleepStart = std::chrono::steady_clock::now();
+                 ps2x::asyncvif::traceEvent('P');
+-                m_eventCv.wait_until(lock, pacingDeadline, [this]()
+-                                     { return !m_events.empty() || gsInterruptUnseen() ||
+-                                              m_stopRequested.load(std::memory_order_acquire); });
++                {
++                    const ps2x_prof::Scope profScope(ps2x_prof::Idle); // ahead of real time
++                    m_eventCv.wait_until(lock, pacingDeadline, [this]()
++                                         { return !m_events.empty() || gsInterruptUnseen() ||
++                                                  m_stopRequested.load(std::memory_order_acquire); });
++                }
+                 ps2x::asyncvif::traceEvent('p', gsInterruptUnseen() ? 1u : 0u);
+                 if (pacingStats)
+                 {
+@@ -2931,6 +2937,7 @@ void EeScheduler::waitForEvent()
+     const bool hasTimerDeadline = timerCycles != std::numeric_limits<uint64_t>::max();
+     if (m_deadlines.empty() && !hasTimerDeadline)
+     {
++        const ps2x_prof::Scope profScope(ps2x_prof::Idle);
+         m_eventCv.wait(lock, [this]()
+                        { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
+         return;
+@@ -2962,9 +2969,13 @@ void EeScheduler::waitForEvent()
+         }
+     }
+ 
+-    const bool signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
+-                                               { return !m_events.empty() ||
+-                                                        m_stopRequested.load(std::memory_order_acquire); });
++    bool signaled = false;
++    {
++        const ps2x_prof::Scope idleScope(ps2x_prof::Idle);
++        signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
++                                        { return !m_events.empty() ||
++                                                 m_stopRequested.load(std::memory_order_acquire); });
++    }
+     if (!signaled)
+     {
+         const uint64_t elapsed = deadlineCycle > m_eeCycle ? deadlineCycle - m_eeCycle : 0u;
+diff --git a/runtime/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/runtime/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 2c60a36..1c442ca 100644
+--- a/runtime/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/runtime/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/gs/gs_frontend.h"
++#include "ps2_prof.h" // RK3326 port: GameThread section markers (bench)
+ #include "runtime/gs/gs_cpu_backend.h"
+ #include "runtime/gs/gs_recording.h"
+ #include "runtime/gs/gs_threaded_backend.h"
+@@ -857,6 +858,7 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
+ 
+ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+ {
++    const ps2x_prof::Scope profScope(ps2x_prof::Gif);
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     if (!data || sizeBytes < 16 || !m_backend)
+         return;
+diff --git a/runtime/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/runtime/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+index 0cf9c8c..45fb98f 100644
+--- a/runtime/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
++++ b/runtime/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/gs/gs_threaded_backend.h"
++#include "ps2_prof.h" // RK3326 port: GameThread section markers (bench)
+ #include "runtime/gs/gs_cpu_backend.h"
+ #include "runtime/gs/gs_gpu_backend.h"
+ #include "runtime/gs/gs_pcsx2_backend.h"
+@@ -321,14 +322,20 @@ void GSThreadedBackend::PublishLocked()
+             if (!(m_stop || m_pending.size() < m_queueChunkLimit))
+             {
+                 const int64_t t0 = gsWaitNowNs();
+-                m_doneCv.wait(lock, [&]
+-                              { return m_stop || m_pending.size() < m_queueChunkLimit; });
++                {
++                    const ps2x_prof::Scope profScope(ps2x_prof::GsWait);
++                    m_doneCv.wait(lock, [&]
++                                  { return m_stop || m_pending.size() < m_queueChunkLimit; });
++                }
+                 g_publishWaits.fetch_add(1, std::memory_order_relaxed);
+                 g_publishWaitNs.fetch_add(static_cast<uint64_t>(gsWaitNowNs() - t0), std::memory_order_relaxed);
+             }
+         }
+-        m_doneCv.wait(lock, [&]
+-                      { return m_stop || m_pending.size() < m_queueChunkLimit; });
++        {
++            const ps2x_prof::Scope profScope(ps2x_prof::GsWait);
++            m_doneCv.wait(lock, [&]
++                          { return m_stop || m_pending.size() < m_queueChunkLimit; });
++        }
+         m_pending.push_back(std::move(m_open));
+         ++m_published;
+         if (!m_spare.empty())
+@@ -360,16 +367,22 @@ void GSThreadedBackend::Drain() const
+     if (g_gsWaitStats)
+     {
+         const int64_t t0 = gsWaitNowNs();
+-        m_doneCv.wait(lock, [&]
+-                      { return m_completed >= target || m_stop; });
++        {
++            const ps2x_prof::Scope profScope(ps2x_prof::GsWait);
++            m_doneCv.wait(lock, [&]
++                          { return m_completed >= target || m_stop; });
++        }
+         g_drains.fetch_add(1, std::memory_order_relaxed);
+         g_drainWaitNs.fetch_add(static_cast<uint64_t>(gsWaitNowNs() - t0), std::memory_order_relaxed);
+         lock.unlock();
+         gsWaitStatsMaybePrint();
+         return;
+     }
+-    m_doneCv.wait(lock, [&]
+-                  { return m_completed >= target || m_stop; });
++    {
++        const ps2x_prof::Scope profScope(ps2x_prof::GsWait);
++        m_doneCv.wait(lock, [&]
++                      { return m_completed >= target || m_stop; });
++    }
+ }
+ 
+ void GSThreadedBackend::WorkerLoop()
+diff --git a/runtime/ps2xRuntime/src/lib/ps2_bench.h b/runtime/ps2xRuntime/src/lib/ps2_bench.h
+index 10f2e02..d576e62 100644
+--- a/runtime/ps2xRuntime/src/lib/ps2_bench.h
++++ b/runtime/ps2xRuntime/src/lib/ps2_bench.h
+@@ -16,6 +16,19 @@
+ //   cpu       - process CPU time / wall time (100% = one full core; 400% = all four RK3326 cores).
+ //   threads   - CPU share of each busy thread (GameThread = recompiled EE code; VUThread, GSThread, GIFThread...).
+ //   rss       - resident memory in MB (/proc/self/statm).
++// Appended after the thread shares (RK3326 port, new fields; everything before them is unchanged):
++//   clocks    - cpu = every core's clock in MHz (one number when they agree), max = the cap the kernel allows now
++//               (thermal throttling lowers it), temps = each thermal zone by type in C, then each devfreq device
++//               (the Mali GPU, the DMC memory controller) as name=MHz, with /busy% when the kernel exposes a load.
++//               "n/a" = not readable on this kernel; the [bench-sensors] line at start says what exists.
++//   game      - the GameThread's wall time by section (ps2_prof.h, CNTVCT_EL0 / TSC counters, exclusive time): ee,
++//               vu1, vu0, iop, dispatch, sched, gif, vif, idle (spare time), gs-wait; dispatch and sched are sampled
++//               (1 call in 128 timed, scaled by the call count); sw/s = exact section switches per second.
++// [bench-sections] (end): the same over the whole measured run, plus the counters' cost per switch (timed on this
++// thread) and the overhead it implies. [bench-thermal] (end): first vs last minute, for long runs (throttling).
++// The counters run only with PS2X_PROF=1 (off by default: the plain run measures exactly what it always did). PS2X_PIN=auto | <thread>:<core>,... pins threads by name (auto: GameThread on the
++// last core, IOPThread and GSThread on the two before it); PS2X_GAME_NICE=<n> sets the GameThread's nice value. Both
++// are off unless set: the default run places nothing.
+ // The first BENCH_WARMUP_SECONDS (PS2X_BENCH_WARMUP, default 20) are left out of the summary (boot and loading).
+ // onSecond(t) runs once per printed line with the seconds since start (ps2_runtime.cpp uses it to load or save a
+ // save state at a set time: PS2X_BENCH_LOAD_STATE / PS2X_BENCH_SAVE_STATE).
+@@ -29,11 +42,14 @@
+ #include <cstring>
+ #include <map>
+ #include <string>
++
++#include "ps2_prof.h"
+ #include <thread>
+ #include <vector>
+ 
+ #if defined(__linux__)
+ #include <dirent.h>
++#include <sched.h>
+ #include <sys/resource.h>
+ #include <unistd.h>
+ #endif
+@@ -152,6 +168,259 @@ namespace ps2x_bench
+         return best > 1000 ? best / 1000 : best;
+     }
+ 
++    inline std::string readSysText(const std::string &path)
++    {
++#if defined(__linux__)
++        FILE *file = std::fopen(path.c_str(), "r");
++        if (!file)
++            return {};
++        char buffer[128] = {};
++        const size_t n = std::fread(buffer, 1, sizeof(buffer) - 1, file);
++        std::fclose(file);
++        std::string text(buffer, n);
++        while (!text.empty() && (text.back() == '\n' || text.back() == ' '))
++            text.pop_back();
++        return text;
++#else
++        (void)path;
++        return {};
++#endif
++    }
++
++    inline std::vector<std::string> listDir(const char *path)
++    {
++        std::vector<std::string> names;
++#if defined(__linux__)
++        if (DIR *dir = opendir(path))
++        {
++            while (dirent *entry = readdir(dir))
++                if (entry->d_name[0] != '.')
++                    names.emplace_back(entry->d_name);
++            closedir(dir);
++        }
++        std::sort(names.begin(), names.end());
++#else
++        (void)path;
++#endif
++        return names;
++    }
++
++    // What the kernel exposes, found once. Anything missing is reported at start and read as "n/a": never fatal.
++    struct Sensors
++    {
++        std::vector<std::string> cpuFreq;                       // scaling_cur_freq per online core
++        std::string cpuMax;                                     // scaling_max_freq of cpu0
++        std::vector<std::pair<std::string, std::string>> zones; // type, temp path
++        struct Dev
++        {
++            std::string name, freq, load;                       // load: "" when not exposed
++        };
++        std::vector<Dev> devs;
++        bool gpuFound = false, dmcFound = false;
++
++        static Sensors discover()
++        {
++            Sensors s;
++            for (int i = 0; i < 16; ++i)
++            {
++                const std::string path = "/sys/devices/system/cpu/cpu" + std::to_string(i) + "/cpufreq/scaling_cur_freq";
++                if (!readSysText(path).empty())
++                    s.cpuFreq.push_back(path);
++            }
++            if (!readSysText("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq").empty())
++                s.cpuMax = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq";
++            for (const std::string &z : listDir("/sys/class/thermal"))
++            {
++                if (z.rfind("thermal_zone", 0) != 0)
++                    continue;
++                const std::string base = "/sys/class/thermal/" + z + "/";
++                if (readSysText(base + "temp").empty())
++                    continue;
++                std::string type = readSysText(base + "type");
++                s.zones.emplace_back(type.empty() ? z : type, base + "temp");
++            }
++            for (const std::string &d : listDir("/sys/class/devfreq"))
++            {
++                const std::string base = "/sys/class/devfreq/" + d + "/";
++                if (readSysText(base + "cur_freq").empty())
++                    continue;
++                Dev dev{d, base + "cur_freq", ""};
++                if (!readSysText(base + "load").empty())
++                    dev.load = base + "load";
++                // Mali kbase (vendor kernels) keeps its busy share next to the device, not in devfreq.
++                if (dev.load.empty() && d.find("gpu") != std::string::npos &&
++                    !readSysText("/sys/devices/platform/" + d + "/utilisation").empty())
++                    dev.load = "/sys/devices/platform/" + d + "/utilisation";
++                s.gpuFound = s.gpuFound || d.find("gpu") != std::string::npos;
++                s.dmcFound = s.dmcFound || d.find("dmc") != std::string::npos;
++                s.devs.push_back(dev);
++            }
++            return s;
++        }
++
++        std::string availability() const
++        {
++            std::string out = "cpu clocks: " + (cpuFreq.empty() ? std::string("unavailable") : std::to_string(cpuFreq.size()) + " cores");
++            out += " | cpu max: " + std::string(cpuMax.empty() ? "unavailable" : "ok");
++            out += " | thermal:";
++            if (zones.empty())
++                out += " unavailable";
++            for (const auto &z : zones)
++                out += " " + z.first;
++            out += " | devfreq:";
++            if (devs.empty())
++                out += " unavailable";
++            for (const auto &d : devs)
++                out += " " + d.name + (d.load.empty() ? " (no load)" : " (load)");
++            if (!gpuFound)
++                out += " | gpu clock: unavailable";
++            if (!dmcFound)
++                out += " | memory controller clock: unavailable";
++            return out;
++        }
++
++        // " | clocks: cpu=1296 max=1296 temps=soc-thermal:52,gpu-thermal:50 ff400000.gpu=400/37% dmc=786"
++        std::string read(int &maxMhzOut, int &hottestOut, int &gpuMhzOut) const
++        {
++            std::string out = " | clocks: cpu=";
++            std::vector<int> mhz;
++            for (const auto &p : cpuFreq)
++                mhz.push_back(std::atoi(readSysText(p).c_str()) / 1000);
++            const bool same = !mhz.empty() && std::all_of(mhz.begin(), mhz.end(), [&](int v) { return v == mhz.front(); });
++            if (mhz.empty())
++                out += "n/a";
++            for (size_t i = 0; i < mhz.size() && (i == 0 || !same); ++i)
++                out += (i ? "/" : "") + std::to_string(mhz[i]);
++            maxMhzOut = cpuMax.empty() ? 0 : std::atoi(readSysText(cpuMax).c_str()) / 1000;
++            out += " max=" + (cpuMax.empty() ? std::string("n/a") : std::to_string(maxMhzOut));
++            out += " temps=";
++            hottestOut = 0;
++            if (zones.empty())
++                out += "n/a";
++            for (size_t i = 0; i < zones.size(); ++i)
++            {
++                int t = std::atoi(readSysText(zones[i].second).c_str());
++                t = t > 1000 ? t / 1000 : t;
++                hottestOut = std::max(hottestOut, t);
++                out += (i ? "," : "") + zones[i].first + ":" + std::to_string(t);
++            }
++            gpuMhzOut = 0;
++            for (const auto &d : devs)
++            {
++                const long long hz = std::atoll(readSysText(d.freq).c_str());
++                const int dmhz = static_cast<int>(hz > 100000 ? hz / 1000000 : hz);
++                if (d.name.find("gpu") != std::string::npos)
++                    gpuMhzOut = dmhz;
++                out += " " + d.name + "=" + std::to_string(dmhz);
++                if (!d.load.empty())
++                {
++                    const std::string load = readSysText(d.load);
++                    out += "/" + (load.empty() ? std::string("n/a") : std::to_string(std::atoi(load.c_str())) + "%");
++                }
++            }
++            if (devs.empty())
++                out += " devfreq=n/a";
++            return out;
++        }
++    };
++
++    // PS2X_PIN / PS2X_GAME_NICE: off unless set. Each thread is placed once, when first seen.
++    inline void applyPinning(const std::map<int, ThreadSample> &threads, std::map<int, bool> &done)
++    {
++#if defined(__linux__)
++        static const std::vector<std::pair<std::string, int>> rules = [] {
++            std::vector<std::pair<std::string, int>> out;
++            const char *v = std::getenv("PS2X_PIN");
++            if (!v || !*v || std::strcmp(v, "0") == 0 || std::strcmp(v, "off") == 0)
++                return out;
++            const int cores = static_cast<int>(sysconf(_SC_NPROCESSORS_ONLN));
++            std::string spec = v;
++            if (spec == "auto" || spec == "1")
++            {
++                if (cores < 4)
++                {
++                    std::fprintf(stderr, "[bench] PS2X_PIN=auto needs 4 cores (%d online): nothing pinned\n", cores);
++                    return out;
++                }
++                spec = "GameThread:" + std::to_string(cores - 1) + ",IOPThread:" + std::to_string(cores - 2) +
++                       ",GSThread:" + std::to_string(cores - 3);
++            }
++            size_t pos = 0;
++            while (pos < spec.size())
++            {
++                const size_t comma = spec.find(',', pos);
++                const std::string item = spec.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
++                const size_t colon = item.find(':');
++                if (colon != std::string::npos)
++                    out.emplace_back(item.substr(0, colon), std::atoi(item.c_str() + colon + 1));
++                if (comma == std::string::npos)
++                    break;
++                pos = comma + 1;
++            }
++            return out;
++        }();
++        static const int gameNice = [] { const char *v = std::getenv("PS2X_GAME_NICE"); return v && *v ? std::atoi(v) : 0; }();
++        if (rules.empty() && gameNice == 0)
++            return;
++        for (const auto &[tid, sample] : threads)
++        {
++            if (done.count(tid))
++                continue;
++            done[tid] = true;
++            for (const auto &[name, core] : rules)
++                if (sample.name == name)
++                {
++                    cpu_set_t set;
++                    CPU_ZERO(&set);
++                    CPU_SET(core, &set);
++                    const int r = sched_setaffinity(tid, sizeof(set), &set);
++                    std::fprintf(stderr, "[bench] pin %s (tid %d) -> core %d%s\n", name.c_str(), tid, core, r == 0 ? "" : " FAILED");
++                }
++            if (gameNice != 0 && sample.name == "GameThread")
++            {
++                const int r = setpriority(PRIO_PROCESS, static_cast<id_t>(tid), gameNice);
++                std::fprintf(stderr, "[bench] nice GameThread = %d%s\n", gameNice, r == 0 ? "" : " FAILED (needs root)");
++            }
++        }
++#else
++        (void)threads;
++        (void)done;
++#endif
++    }
++
++    // Cost of one section switch (ps2x_prof::account), timed here on the bench thread with private counters: the same
++    // instructions the GameThread runs at each switch.
++    inline double switchCostNs()
++    {
++        static ps2x_prof::Counters counters;
++        ps2x_prof::ThreadState state;
++        state.last = ps2x_prof::ticks();
++        constexpr int kSwitches = 2000000;
++        const auto t0 = std::chrono::steady_clock::now();
++        for (int i = 0; i < kSwitches; ++i)
++            ps2x_prof::account(counters, state, static_cast<uint8_t>(i & 3));
++        const auto t1 = std::chrono::steady_clock::now();
++        return std::chrono::duration<double, std::nano>(t1 - t0).count() / kSwitches;
++    }
++
++    // Average cost of one dispatch/sched marker (counted always, timed 1 in kSampleEvery), timed on the bench thread at
++    // the very end of the run (its counts land in the shared totals, which are no longer read by then).
++    inline double sampledCostNs()
++    {
++        ps2x_prof::ThreadState saved = ps2x_prof::t_state;
++        ps2x_prof::t_state = {};
++        ps2x_prof::t_state.counting = true;
++        constexpr int kCalls = 2000000;
++        const auto t0 = std::chrono::steady_clock::now();
++        for (int i = 0; i < kCalls; ++i)
++        {
++            ps2x_prof::SampledScope scope(ps2x_prof::Dispatch);
++        }
++        const auto t1 = std::chrono::steady_clock::now();
++        ps2x_prof::t_state = saved;
++        return std::chrono::duration<double, std::nano>(t1 - t0).count() / kCalls;
++    }
++
+     inline double percentile(std::vector<double> values, double p)
+     {
+         if (values.empty())
+@@ -194,6 +463,17 @@ namespace ps2x_bench
+         auto threadsStart = sampleThreads();
+         std::vector<double> fieldRates, frameRates, flipRates, dispRates, worstGaps, rssValues;
+         double cpuSum = 0.0;
++        const Sensors sensors = Sensors::discover();
++        std::fprintf(stderr, "[bench-sensors] %s\n", sensors.availability().c_str());
++        std::map<int, bool> pinned;
++        applyPinning(threadsStart, pinned);
++        uint64_t sectionStart[ps2x_prof::Count] = {}, switchesStart = 0;
++        double sectionSum[ps2x_prof::Count] = {};
++        ps2x_prof::snapshot(sectionStart, switchesStart);
++        ps2x_prof::SampledSnapshot sampledStart = ps2x_prof::sampledSnapshot();
++        const double intervalBias = ps2x_prof::emptyIntervalTicks();
++        double switchesSum = 0.0, sampledCallsSum = 0.0;
++        std::vector<double> speeds, temps, maxClocks, gpuClocks;
+ 
+         std::fprintf(stderr, "[bench] started; warmup %.0f s excluded from the summary\n", warmup);
+         auto lastPoll = start;
+@@ -246,6 +526,7 @@ namespace ps2x_bench
+             const double rss = rssMegabytes();
+             const double t = std::chrono::duration<double>(now - start).count();
+ 
++            applyPinning(threadsNow, pinned);
+             std::string threadText;
+             for (const auto &[tid, sample] : threadsNow)
+             {
+@@ -258,8 +539,55 @@ namespace ps2x_bench
+                 std::snprintf(part, sizeof(part), " %s=%.0f%%", sample.name.c_str(), share);
+                 threadText += part;
+             }
+-            std::fprintf(stderr, "[bench]%s t=%.0f fields/s=%.1f speed=%.0f%% frames/s=%.1f flips/s=%.1f disp/s=%.1f worst=%.0fms cpu=%.0f%% rss=%.0fMB mhz=%d temp=%dC |%s\n",
+-                         jump ? " (state load, left out)" : "", t, fieldRate, 100.0 * fieldRate / 59.94, frameRate, flipRate, dispRate, worstMs, cpu, rss, cpuMhz(), hottestC(), threadText.c_str());
++            int maxMhz = 0, hottest = 0, gpuMhz = 0;
++            const std::string clockText = sensors.read(maxMhz, hottest, gpuMhz);
++            uint64_t sectionNow[ps2x_prof::Count] = {}, switchesNow = 0;
++            ps2x_prof::snapshot(sectionNow, switchesNow);
++            uint64_t windowTicks = 0;
++            uint64_t sectionDelta[ps2x_prof::Count] = {};
++            for (int i = 0; i < ps2x_prof::Count; ++i)
++            {
++                sectionDelta[i] = sectionNow[i] >= sectionStart[i] ? sectionNow[i] - sectionStart[i] : 0u;
++                windowTicks += sectionDelta[i];
++            }
++            const double switchRate = static_cast<double>(switchesNow - switchesStart) / seconds;
++            const ps2x_prof::SampledSnapshot sampledNow = ps2x_prof::sampledSnapshot();
++            ps2x_prof::SampledSnapshot sampledDelta;
++            uint64_t sampledCalls = 0;
++            for (int i = 0; i < ps2x_prof::Count; ++i)
++            {
++                sampledDelta.calls[i] = sampledNow.calls[i] - sampledStart.calls[i];
++                sampledDelta.timed[i] = sampledNow.timed[i] - sampledStart.timed[i];
++                sampledCalls += sampledDelta.calls[i];
++                for (int j = 0; j < ps2x_prof::Count; ++j)
++                {
++                    sampledDelta.inside[i][j] = sampledNow.inside[i][j] - sampledStart.inside[i][j];
++                    sampledDelta.intervals[i][j] = sampledNow.intervals[i][j] - sampledStart.intervals[i][j];
++                }
++            }
++            double sectionShare[ps2x_prof::Count] = {};
++            ps2x_prof::combine(sectionDelta, sampledDelta, intervalBias, sectionShare);
++            std::string sectionText;
++            if (windowTicks == 0u)
++                sectionText = " n/a";
++            for (int i = 0; i < ps2x_prof::Count && windowTicks; ++i)
++            {
++                const double share = 100.0 * sectionShare[i] / static_cast<double>(windowTicks);
++                if (share >= 0.5)
++                {
++                    char part[48];
++                    std::snprintf(part, sizeof(part), " %s=%.0f%%", ps2x_prof::kNames[i], share);
++                    sectionText += part;
++                }
++            }
++            if (windowTicks)
++            {
++                char part[48];
++                std::snprintf(part, sizeof(part), " sw/s=%.0fk", switchRate / 1000.0);
++                sectionText += part;
++            }
++            std::fprintf(stderr, "[bench]%s t=%.0f fields/s=%.1f speed=%.0f%% frames/s=%.1f flips/s=%.1f disp/s=%.1f worst=%.0fms cpu=%.0f%% rss=%.0fMB mhz=%d temp=%dC |%s%s | game:%s\n",
++                         jump ? " (state load, left out)" : "", t, fieldRate, 100.0 * fieldRate / 59.94, frameRate, flipRate, dispRate, worstMs, cpu, rss, cpuMhz(), hottestC(), threadText.c_str(), clockText.c_str(), sectionText.c_str());
+ 
+             onSecond(t);
+             if (t >= warmup && !jump)
+@@ -271,7 +599,19 @@ namespace ps2x_bench
+                 worstGaps.push_back(worstMs);
+                 rssValues.push_back(rss);
+                 cpuSum += cpu;
++                for (int i = 0; i < ps2x_prof::Count; ++i)
++                    sectionSum[i] += sectionShare[i];
++                switchesSum += switchRate;
++                sampledCallsSum += static_cast<double>(sampledCalls) / seconds;
++                speeds.push_back(100.0 * fieldRate / 59.94);
++                temps.push_back(hottest);
++                maxClocks.push_back(maxMhz);
++                gpuClocks.push_back(gpuMhz);
+             }
++            for (int i = 0; i < ps2x_prof::Count; ++i)
++                sectionStart[i] = sectionNow[i];
++            switchesStart = switchesNow;
++            sampledStart = sampledNow;
+             windowStart = now;
+             startField = field;
+             flips = 0;
+@@ -303,5 +643,50 @@ namespace ps2x_bench
+                      mean(frameRates), percentile(frameRates, 0.05),
+                      mean(flipRates), percentile(flipRates, 0.05), mean(dispRates), percentile(worstGaps, 0.95),
+                      percentile(worstGaps, 1.0), cpuSum / n, percentile(rssValues, 1.0));
++
++        double total = 0.0;
++        for (double c : sectionSum)
++            total += c;
++        if (total <= 0.0)
++            std::fprintf(stderr, "[bench-sections] off (set PS2X_PROF=1 for the GameThread breakdown)\n");
++        else
++        {
++            std::string sectionText;
++            for (int i = 0; i < ps2x_prof::Count; ++i)
++            {
++                char part[48];
++                std::snprintf(part, sizeof(part), " %s=%.1f%%", ps2x_prof::kNames[i], 100.0 * sectionSum[i] / total);
++                sectionText += part;
++            }
++            const double costNs = switchCostNs();
++            const double sampledNs = sampledCostNs();
++            const double switchesPerSecond = switchesSum / n, sampledPerSecond = sampledCallsSum / n;
++            // Each Scope is two switches (in and out); the figures are per switch and per sampled marker.
++            const double overhead = 100.0 * (switchesPerSecond * costNs + sampledPerSecond * sampledNs) / 1e9;
++            std::fprintf(stderr, "[bench-sections] GameThread wall time:%s | switches/s=%.0f x %.1f ns + sampled markers/s=%.0f x %.1f ns -> overhead ~%.2f%% of the GameThread | counter read bias %.2f ticks\n",
++                         sectionText.c_str(), switchesPerSecond, costNs, sampledPerSecond, sampledNs, overhead, intervalBias);
++        }
++        // Long runs: does the speed hold once the device is hot?
++        const size_t m = std::min<size_t>(60u, speeds.size() / 2u);
++        if (m > 0u)
++        {
++            const auto avg = [](const std::vector<double> &v, size_t from, size_t count) {
++                double sum = 0.0;
++                for (size_t i = from; i < from + count; ++i)
++                    sum += v[i];
++                return sum / static_cast<double>(count);
++            };
++            const size_t last = speeds.size() - m;
++            const auto minPositive = [](const std::vector<double> &v) {
++                double best = 0.0;
++                for (double x : v)
++                    if (x > 0.0 && (best == 0.0 || x < best))
++                        best = x;
++                return best;
++            };
++            std::fprintf(stderr, "[bench-thermal] first %zu s: speed=%.0f%% temp=%.0fC | last %zu s: speed=%.0f%% temp=%.0fC | temp max=%.0fC | cpu cap min=%.0f MHz | gpu clock min=%.0f MHz (0 = n/a)\n",
++                         m, avg(speeds, 0, m), avg(temps, 0, m), m, avg(speeds, last, m), avg(temps, last, m),
++                         percentile(temps, 1.0), minPositive(maxClocks), minPositive(gpuClocks));
++        }
+     }
+ }
+diff --git a/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp b/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 4874d61..f1a95f7 100644
+--- a/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1,5 +1,6 @@
+ #include "runtime/ps2_async_vif.h"
+ #include "ps2_runtime.h"
++#include "ps2_prof.h" // RK3326 port: GameThread section markers (bench)
+ #include "ps2_module_table.h"
+ #include "runtime/ps2_save_state.h"
+ #include "runtime/ps2_pnach.h"
+@@ -1810,6 +1811,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+                                      GuestBranchKind kind,
+                                      const char *debugName)
+ {
++    ps2x_prof::SampledScope profScope(ps2x_prof::Dispatch); // sampled: millions of calls per second
+     ctx->pc = targetPc;
+     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
+ 
+@@ -1875,7 +1877,9 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+     const uint32_t entryPc = ctx->pc;
+     const uint64_t jumpSerial = g_guestJumpSerial;
+     pushBranchEvent(0u, sourcePc, targetPc, ctx, fallthroughPc);
++    profScope.pause(); // the target function is not dispatch time
+     targetFn(rdram, ctx, this);
++    profScope.resume();
+     pushBranchEvent(1u, targetPc, ctx->pc, ctx, fallthroughPc);
+ 
+     if (m_eeScheduler->transferPending() || m_eeScheduler->unwinding() || isStopRequested() || ctx->pc == 0u)
+@@ -2790,6 +2794,7 @@ bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
+         g_ps2xEeDeferred = deferred;
+         return false;
+     }
++    ps2x_prof::SampledScope profScope(ps2x_prof::Sched); // the slow path only: the fast one above is part of the loop
+     // PS2X_EE_LOOP_CYCLES=<n>: EE cycles charged per backward branch of generated code (default 32). A plain global
+     // read once: a function-local static costs a thread-local guard check on every backward branch.
+     static uint32_t s_loopCycles = 0u;
+@@ -2984,6 +2989,7 @@ void PS2Runtime::run()
+     std::thread gameThread([&]()
+                            {
+         ThreadNaming::SetCurrentThreadName("GameThread");
++        ps2x_prof::registerGameThread();
+         ThreadPriority::RaiseCurrentThread(ThreadPriority::Level::Highest);
+         try
+         {
+diff --git a/runtime/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/runtime/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+index dfff82a..f9759b8 100644
+--- a/runtime/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/runtime/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -1,5 +1,6 @@
+ // Based on Blackline Interactive implementation
+ #include "runtime/ps2_memory.h"
++#include "ps2_prof.h" // RK3326 port: GameThread section markers (bench)
+ #include <algorithm>
+ #include <cstring>
+ #include <vector>
+@@ -475,6 +476,7 @@ void PS2Memory::processVIF1Data(uint32_t srcPhys, uint32_t sizeBytes)
+ 
+ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+ {
++    const ps2x_prof::Scope profScope(ps2x_prof::Vif);
+     if (sizeBytes == 0u)
+         return;
+ 
+diff --git a/runtime/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/runtime/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 06b4a50..beb92bd 100644
+--- a/runtime/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/runtime/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/ps2_vu1.h"
++#include "ps2_prof.h" // RK3326 port: GameThread section markers (bench)
+ #include "runtime/gs/ps2_gif_arbiter.h"
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/ps2_memory.h"
+@@ -1314,6 +1315,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
+                              uint32_t startPC, uint32_t top, uint32_t itop,
+                              uint32_t maxCycles)
+ {
++    const ps2x_prof::Scope profScope(m_unit == Unit::VU1 ? ps2x_prof::VU1 : ps2x_prof::VU0);
+     resetScheduler();
+     m_state.pc = startPC & microAddressMask();
+     m_state.ebit = false;
+@@ -1348,6 +1350,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+                          uint8_t *vuData, uint32_t dataSize,
+                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
+ {
++    const ps2x_prof::Scope profScope(m_unit == Unit::VU1 ? ps2x_prof::VU1 : ps2x_prof::VU0);
+     if (m_unit == Unit::VU1)
+     {
+         captureVu1Program(vuCode, codeSize, memory, m_state.pc);

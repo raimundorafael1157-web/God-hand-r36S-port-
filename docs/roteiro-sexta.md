@@ -37,4 +37,15 @@ sh run_bench.sh "/roms/ps2/God Hand (USA).iso" swgs 600
 sh run_gles.sh fight.gsr 3                                            # a GPU desenhando a luta gravada (renderer/gles)
 ```
 
+Depois, as rodadas de diagnóstico (instrumentação; nenhuma muda o jogo, todas desligadas no comando simples acima):
+
+```sh
+PS2X_PROF=1 sh run_bench.sh "/roms/ps2/God Hand (USA).iso" cpu 300 stage1.state   # tempo por subsistema (EE, VU1, IOP...)
+PS2X_PROF=1 PS2X_PIN=auto sh run_bench.sh "/roms/ps2/God Hand (USA).iso" cpu 300 stage1.state   # o mesmo, threads fixas em núcleos
+sh run_bench.sh "/roms/ps2/God Hand (USA).iso" cpu 900 stage1.state   # 15 min: aquecimento e throttling ([bench-thermal])
+```
+
+A primeira linha do log (`[bench-sensors]`) diz quais sensores o kernel do ArkOS expõe; o que faltar aparece como
+`n/a` e o teste continua. A rodada de 900 s é a mais longa: deixe o R36S na mesa, fora da capa, carregado.
+
 Mande de volta: `hw.txt`, os arquivos `bench-*.log`, `gles-*.log` e um dos `frame-*.ppm` (para ver se a imagem saiu certa).
