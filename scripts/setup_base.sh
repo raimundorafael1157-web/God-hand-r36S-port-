@@ -19,7 +19,13 @@ git fetch --depth 1 origin "$BASE_COMMIT" 2>/dev/null || git fetch origin
 git checkout -q --force "$BASE_COMMIT"
 # Keeps the game-derived folders and every build tree (build-host, build-x64, build-rk3326: hours of compiling).
 git clean -qfd -e game -e generated -e generated_modules -e 'build*' -e out
+# PATCH_MAX=0009 stops after that patch (package A of the A/B comparison: 0001-0009; package B: all of them).
 for patch in "$REPO"/patches/*.patch; do
+    num=$(basename "$patch" | cut -c1-4)
+    if [ -n "${PATCH_MAX:-}" ] && [ "$num" \> "$PATCH_MAX" ]; then
+        echo "skipping $(basename "$patch") (PATCH_MAX=$PATCH_MAX)"
+        continue
+    fi
     echo "applying $(basename "$patch")"
     git apply --whitespace=nowarn "$patch"
 done

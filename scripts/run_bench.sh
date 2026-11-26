@@ -20,7 +20,13 @@ MODE=${2:-cpu}
 SECONDS_LIMIT=${3:-600}
 STATE=${4:-}
 case "$STATE" in ""|/*) ;; *) STATE="$(pwd)/$STATE";; esac
-LOG="$DIR/bench-$MODE-$(date +%Y%m%d-%H%M%S).log"
+# GODHAND_BIN picks the binary (package A/B: godhand-A, godhand-B); default godhand-A, or godhand in older packages.
+# BENCH_TAG goes into the log name (run_ab.sh: A1, B1...).
+if [ -n "${GODHAND_BIN:-}" ]; then BIN="$DIR/$GODHAND_BIN"
+elif [ -x "$DIR/godhand-A" ]; then BIN="$DIR/godhand-A"
+else BIN="$DIR/godhand"; fi
+[ -x "$BIN" ] || { echo "binary not found: $BIN"; exit 1; }
+LOG="$DIR/bench-$MODE${BENCH_TAG:+-$BENCH_TAG}-$(date +%Y%m%d-%H%M%S).log"
 
 {
     echo "== device"; uname -a; cat /proc/device-tree/model 2>/dev/null; echo
@@ -62,8 +68,8 @@ fi
 # The binary links libEGL/libGLESv2/libgbm/libdrm even when it draws nothing: a missing one stops it before main.
 # If only those are missing, the empty ones in stubs/ (scripts/make_gl_stubs.sh) stand in: the bench never calls them.
 if command -v ldd >/dev/null 2>&1; then
-    { echo "== ldd"; ldd "$DIR/godhand"; } >> "$LOG" 2>&1
-    MISSING=$(ldd "$DIR/godhand" 2>&1 | awk '/not found/ {print $1}')
+    { echo "== ldd"; ldd "$BIN"; } >> "$LOG" 2>&1
+    MISSING=$(ldd "$BIN" 2>&1 | awk '/not found/ {print $1}')
     if [ -n "$MISSING" ]; then
         OTHER=$(echo "$MISSING" | grep -vE '^(libEGL\.so\.1|libGLESv2\.so\.2|libgbm\.so\.1|libdrm\.so\.2)$' || true)
         if [ -z "$OTHER" ] && [ -d "$DIR/stubs" ]; then
@@ -76,7 +82,8 @@ if command -v ldd >/dev/null 2>&1; then
 fi
 
 echo "measuring ($MODE, $SECONDS_LIMIT s)... log: $LOG"
-"$DIR/godhand" --iso "$ISO" --headless --time-limit "$SECONDS_LIMIT" >> "$LOG" 2>&1
+echo "== binary $(basename "$BIN") ($(wc -c < "$BIN") bytes)" >> "$LOG"
+"$BIN" --iso "$ISO" --headless --time-limit "$SECONDS_LIMIT" >> "$LOG" 2>&1
 echo "exit code $?" >> "$LOG"
 { echo "== after"; for z in /sys/class/thermal/thermal_zone*; do echo "$z $(cat $z/temp 2>/dev/null)"; done; } >> "$LOG" 2>&1
 grep -E "^\[bench-summary\]|ERROR|exit code" "$LOG"
