@@ -11,6 +11,7 @@ Tudo abaixo está marcado como **fato** (lido em código/documentação), **infe
   (ver `research/prior-art.md`).
 - **Inferência:** escalando isso para o RK3326, a CPU sozinha daria algo como 3–8 campos/s em luta, muito abaixo
   de 20 FPS. Margem de erro grande (até ~3x), porque não sabemos se o celular estava limitado por CPU ou por GPU.
+- **Decisão (25/11):** caminho B aprovado pelo usuário. Andamento em `docs/bench-mode.md`.
 - **Mudança proposta no método:** medir direto no R36S com um build ARM64 headless (sem tela), em vez de medir no
   PC e dividir por uma razão de benchmark. O port Android já resolveu o ARM64, então esse build é barato.
   Isso exige escrever código de build, o que o prompt adia para depois da Fase 0: **precisa da sua autorização.**

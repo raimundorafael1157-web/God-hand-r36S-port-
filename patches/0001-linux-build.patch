@@ -1,0 +1,50 @@
+diff --git a/runtime/ps2xIOP/include/ps2x/iop/iop_pad.h b/runtime/ps2xIOP/include/ps2x/iop/iop_pad.h
+index fdb9199..d6b8c5a 100644
+--- a/runtime/ps2xIOP/include/ps2x/iop/iop_pad.h
++++ b/runtime/ps2xIOP/include/ps2x/iop/iop_pad.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <array>
++#include <cstddef>
+ #include <cstdint>
+ 
+ namespace ps2x::iop
+diff --git a/runtime/ps2xRuntime/src/lib/ps2_pnach.cpp b/runtime/ps2xRuntime/src/lib/ps2_pnach.cpp
+index d621971..ae4412e 100644
+--- a/runtime/ps2xRuntime/src/lib/ps2_pnach.cpp
++++ b/runtime/ps2xRuntime/src/lib/ps2_pnach.cpp
+@@ -417,7 +417,7 @@ namespace ps2x::pnach
+             {
+                 std::error_code error;
+                 const auto time = std::filesystem::last_write_time(path, error);
+-                text += path + '|' + (error ? std::string("-") : std::to_string(time.time_since_epoch().count())) + '\n';
++                text += path + '|' + (error ? std::string("-") : std::to_string(static_cast<long long>(time.time_since_epoch().count()))) + '\n';
+             }
+             return text;
+         }
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 097a9d5..6023bc8 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -231,7 +231,8 @@ endif()
+ target_include_directories(godhand PRIVATE
+     "${CMAKE_CURRENT_SOURCE_DIR}"
+     "${CMAKE_CURRENT_BINARY_DIR}/godhand_generated"
+-    "${GODHAND_GENERATED_DIR}")
++    "${GODHAND_GENERATED_DIR}"
++    "${CMAKE_SOURCE_DIR}/runtime/ps2xRuntime/src/lib")
+ target_link_libraries(godhand PRIVATE godhand_game_code ps2_runtime)
+ target_compile_definitions(godhand PRIVATE GODHAND_RUNTIME_HAS_SET_HEADLESS=${GODHAND_RUNTIME_HAS_SET_HEADLESS})
+ 
+@@ -244,6 +245,10 @@ if(MSVC)
+     # runtime objects only. The generated game code never gets /GL (above), so it is not part of that step.
+     target_link_options(godhand PRIVATE /FORCE:MULTIPLE /STACK:16777216 $<$<CONFIG:RelWithDebInfo>:/LTCG>)
+     target_link_libraries(godhand PRIVATE dbghelp winmm)
++else()
++    # Linux (rk3326 port): same intent as MSVC's /STACK for the main thread is handled in main.cpp; the game layer
++    # passes GODHAND_ARCH_NAME too.
++    target_compile_definitions(godhand PRIVATE GODHAND_ARCH_NAME="${GODHAND_ARCH}")
+ endif()
+ 
+ if(GODHAND_DEBUG_UI AND TARGET rlImGui)

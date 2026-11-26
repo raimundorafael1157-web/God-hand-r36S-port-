@@ -1,0 +1,10 @@
+# Base project checkout, sysroot and anything derived from the game disc: never committed.
+source/
+builds/
+*.iso
+*.7z
+*.state
+generated/
+generated_modules/
+build*/
+tests/bench_loop_test

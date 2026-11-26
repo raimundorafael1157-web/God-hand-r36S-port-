@@ -17,8 +17,10 @@ Levantado em 25/11/2026. Fato = lido no repositório; inferência = marcado como
 
 - https://github.com/Ptraaah/godhand-recompiled-android, GPL-3.0, **descontinuado** em 2026-11-14 (`d88f02a`).
   O autor libera forks.
-- Já resolveu o que a nossa Fase 2 propõe: o código recompilado compila e roda em **ARM64**, com
-  intrínsecos tratados, contexto EGL / GLES 3.2 e shaders traduzidos de `#version 460 core` para `#version 320 es`.
+- **Correção (26/11):** o repositório publica só a casca Android e a ponte do GS do PCSX2 (`android/`, `path-b/`).
+  As mudanças ARM64 do núcleo (runtime e código do port, `libgodhand.so`) **não foram publicadas**. Os relatórios
+  em `docs/milestones/` descrevem o que foi feito e servem de mapa, mas o porte do núcleo foi refeito aqui
+  (ver `docs/bench-mode.md`).
 - Aparelho de referência: POCO F5 (Snapdragon 7+ Gen 2, Adreno 725, 8–12 GB). Números do `docs/PROGRESS.md`:
   - Renderizador CPU do runtime: tela de título a **1 FPS** (pior quadro 1.328 ms).
   - Renderizador GPU próprio (GLES): menus 60 FPS; em jogo o mundo avançava 1–3 quadros novos por segundo.
@@ -29,7 +31,7 @@ Levantado em 25/11/2026. Fato = lido no repositório; inferência = marcado como
 
 ## Inferência para o RK3326
 
-- O port Android é o ponto de partida natural: a parte ARM64 já existe. O que falta é Linux (SDL2/KMS em vez de
-  Android) e, principalmente, caber num hardware muito mais fraco.
+- O port Android prova que o código recompilado roda em ARM64, mas o código do núcleo não está disponível. O porte
+  ARM64 do runtime foi refeito aqui a partir do projeto-base, com o gancho `USE_SSE2NEON` que o próprio runtime já tinha.
 - Ordem de grandeza (aproximada, de memória, **a medir**): um núcleo Cortex-A35 a ~1,4 GHz rende cerca de 1/10 a 1/15
   do núcleo principal do Snapdragon 7+ Gen 2; a Mali-G31 MP2 tem cerca de 1/40 do poder de cálculo da Adreno 725.
