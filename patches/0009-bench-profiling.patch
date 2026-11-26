@@ -18,10 +18,10 @@ index 2414e1c..b478fc5 100644
              m_impl->runEeCyclesAsync(eeCycles);
 diff --git a/runtime/ps2xRuntime/include/ps2_prof.h b/runtime/ps2xRuntime/include/ps2_prof.h
 new file mode 100644
-index 0000000..0f4cfb9
+index 0000000..1c9d6ba
 --- /dev/null
 +++ b/runtime/ps2xRuntime/include/ps2_prof.h
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,384 @@
 +#pragma once
 +// RK3326 port: where the GameThread spends its time, measured with the CPU's own counter. The GameThread runs the
 +// recompiled EE code and, inline, the VU1 microprograms, part of the IOP, the scheduler and the GS/VIF front end: one
@@ -31,7 +31,7 @@ index 0000000..0f4cfb9
 +// ARM64, the TSC on x86-64), adds the time since the previous switch to the section being left, and records the new
 +// one: exclusive time, so a VU1 microprogram started from EE code counts as vu1, not ee, and the sections add up to the
 +// thread's wall time. Waiting is a section too: idle = the EE has nothing due yet or is ahead of real time (pacing);
-+// gs-wait = blocked on the GS thread's queue.
++// gs-wait = blocked on the GS thread's queue; vu-wait = blocked on the VU1 worker thread (PS2X_MTVU=1).
 +//
 +// dispatch and sched are entered millions of times per second: timing every entry cost ~45% of the GameThread on the
 +// PC. They are sampled instead (SampledScope): every call is counted, one in kSampleEvery on average is timed (picked
@@ -68,10 +68,11 @@ index 0000000..0f4cfb9
 +        Vif,       // VIF1 data: unpacks into VU1 memory
 +        Idle,      // scheduler waits: nothing due yet, or the EE ahead of real time (spare time)
 +        GsWait,    // blocked on the GS thread (queue full, drain)
++        VuWait,    // blocked on the VU1/VIF1 worker thread (PS2X_MTVU=1 only: otherwise VU1 runs inline, as vu1)
 +        Count
 +    };
 +
-+    inline const char *const kNames[Count] = {"ee", "vu1", "vu0", "iop", "dispatch", "sched", "gif", "vif", "idle", "gs-wait"};
++    inline const char *const kNames[Count] = {"ee", "vu1", "vu0", "iop", "dispatch", "sched", "gif", "vif", "idle", "gs-wait", "vu-wait"};
 +
 +    // The counter: CNTVCT_EL0 (ARM generic timer, 24 MHz on the RK3326), the TSC on x86-64, else steady_clock in ns.
 +    inline uint64_t ticks()
@@ -552,6 +553,59 @@ index 0cf9c8c..45fb98f 100644
  }
  
  void GSThreadedBackend::WorkerLoop()
+diff --git a/runtime/ps2xRuntime/src/lib/ps2_async_vif.cpp b/runtime/ps2xRuntime/src/lib/ps2_async_vif.cpp
+index c46799e..9288cce 100644
+--- a/runtime/ps2xRuntime/src/lib/ps2_async_vif.cpp
++++ b/runtime/ps2xRuntime/src/lib/ps2_async_vif.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/ps2_async_vif.h"
++#include "ps2_prof.h" // RK3326 port: GameThread section markers (bench)
+ #include "runtime/ps2_memory.h"
+ #include "runtime/ee_scheduler.h"
+ #include "runtime/gs/ps2_gif_arbiter.h"
+@@ -449,6 +450,7 @@ namespace ps2x::asyncvif
+         }
+         traceEvent('K', static_cast<uint32_t>(job.items.size()));
+         {
++            const ps2x_prof::Scope profScope(ps2x_prof::VuWait); // queue full: wait for the VU1 worker
+             std::unique_lock<std::mutex> lock(worker->mutex);
+             worker->idleCv.wait(lock, [&]
+                                 { return worker->jobs.size() < kMaxQueuedJobs; });
+@@ -488,6 +490,7 @@ namespace ps2x::asyncvif
+             Worker *worker = s_worker;
+             if (!worker || worker->memory != &memory)
+                 return;
++            const ps2x_prof::Scope profScope(ps2x_prof::VuWait);
+             std::unique_lock<std::mutex> lock(worker->mutex);
+             worker->idleCv.wait(lock, [&]
+                                 { return worker->jobs.empty() && !worker->busy; });
+@@ -557,6 +560,7 @@ namespace ps2x::asyncvif
+         if (!worker || worker->memory != &memory)
+             return false;
+         const auto deadline = std::chrono::steady_clock::now() + timeout;
++        const ps2x_prof::Scope profScope(ps2x_prof::VuWait);
+         {
+             std::unique_lock<std::mutex> lock(worker->mutex);
+             if (!worker->idleCv.wait_until(lock, deadline, [&] { return worker->jobs.empty() && !worker->busy; }))
+@@ -594,7 +598,10 @@ namespace ps2x::asyncvif
+                 if (target > now)
+                     timing.hooks.consumeEeCycles(std::min<uint64_t>(target - now, 65536u));
+                 else
++                {
++                    const ps2x_prof::Scope profScope(ps2x_prof::VuWait); // VU1 still busy: the EE gives way
+                     std::this_thread::yield();
++                }
+                 return true;
+             }
+         }
+@@ -634,6 +641,7 @@ namespace ps2x::asyncvif
+         if (!worker || worker->memory != &memory)
+             return;
+         traceEvent('W', vu1Timing().hooks.eeCycle ? static_cast<uint32_t>(vu1Timing().hooks.eeCycle() >> 10) : 0u); // EE cycle / 1024
++        const ps2x_prof::Scope profScope(ps2x_prof::VuWait);
+         {
+             std::unique_lock<std::mutex> lock(worker->mutex);
+             worker->idleCv.wait(lock, [&]
 diff --git a/runtime/ps2xRuntime/src/lib/ps2_bench.h b/runtime/ps2xRuntime/src/lib/ps2_bench.h
 index 10f2e02..d576e62 100644
 --- a/runtime/ps2xRuntime/src/lib/ps2_bench.h
