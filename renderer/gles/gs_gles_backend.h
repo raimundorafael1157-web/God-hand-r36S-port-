@@ -173,6 +173,11 @@ namespace gles
         std::unordered_map<uint64_t, uint32_t> m_framebuffers;        // by (colour texture, depth)
         std::unordered_map<uint64_t, Texture> m_textures;             // by TEX0 fields
         std::array<uint32_t, 512> m_pageGen{};                        // 8 KB GS pages
+        // Hash of each page's bytes, and the page generation it was taken at: a page written since is hashed again,
+        // once, however many textures sit on it (the game rewrites the same texture pages every frame).
+        std::array<uint64_t, 512> m_pageHash{};
+        std::array<uint32_t, 512> m_pageHashGen;                      // ~0u = never hashed (set in the constructor)
+        uint64_t PagesHash(uint32_t first, uint32_t count);
         uint32_t m_genCounter = 1;
         std::array<uint16_t, 512> m_clut16{};                         // the CPU backend's CLUT buffer
         uint64_t m_clutHash = 0;

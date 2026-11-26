@@ -191,6 +191,7 @@ void main()
     GSGlesBackend::GSGlesBackend()
     {
         m_vertices.reserve(65536);
+        m_pageHashGen.fill(~0u);
         std::memset(&m_key, 0, sizeof(m_key)); // keys are compared byte for byte: padding must be zero too
         std::memset(&m_applied, 0, sizeof(m_applied));
     }
@@ -646,6 +647,26 @@ void main()
         }
     }
 
+    // The bytes of pages first..first+count-1, as one number: each page's hash is kept with the page generation it was
+    // taken at, so a page is read again only after something wrote to it.
+    uint64_t GSGlesBackend::PagesHash(uint32_t first, uint32_t count)
+    {
+        if (!m_vram)
+            return 0u;
+        uint64_t h = mix64(0x7Eu, count);
+        for (uint32_t p = first; p < first + count && p < m_pageGen.size(); ++p)
+        {
+            if (m_pageHashGen[p] != m_pageGen[p])
+            {
+                m_pageHash[p] = hashBytes(m_vram + static_cast<size_t>(p) * 8192u, 8192u, 0x7Eu);
+                m_pageHashGen[p] = m_pageGen[p];
+                m_stats.hashedBytes += 8192u;
+            }
+            h = mix64(h, m_pageHash[p]);
+        }
+        return h;
+    }
+
     uint32_t GSGlesBackend::TextureFor(const GSDrawState &state)
     {
         ++m_stats.textureLookups;
@@ -687,9 +708,7 @@ void main()
             return t.id;
         // Its pages were written since the last look. The game streams many textures through the same VRAM area
         // each frame and mostly writes back the same bytes: compare what is there now with what was decoded.
-        const uint64_t content = m_vram ? hashBytes(m_vram + static_cast<size_t>(first) * 8192u,
-                                                    static_cast<size_t>(count) * 8192u, 0x7Eu) : 0u;
-        m_stats.hashedBytes += static_cast<uint64_t>(count) * 8192u;
+        const uint64_t content = PagesHash(first, count);
         if (t.id && clutSame && content == t.contentHash && t.width == w && t.height == h)
         {
             t.generation = m_genCounter;
