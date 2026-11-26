@@ -43,8 +43,6 @@ namespace gles
         uint32_t readbacks = 0;      // GPU images copied into the VRAM image for those draws (colour and depth)
         uint32_t targetUploads = 0;  // VRAM images copied to the GPU after CPU draws or game uploads
         uint32_t depthLost = 0;      // CPU draws that wrote depth: the GPU depth buffer does not see it yet
-        uint32_t shuffles = 0;       // CT16 views of 32-bit frame buffers redrawn on the GPU (texture shuffles)
-        uint32_t relayouts = 0;      // frame buffers re-laid out on the GPU for another width
     };
 
     class GSGlesBackend final : public GSRasterBackend, public GSBackendStateAccess
@@ -124,8 +122,6 @@ namespace gles
             uint8_t fogR = 0, fogG = 0, fogB = 0;
             uint16_t texW = 1, texH = 1;        // GS texture size, to scale s,t when the texture is a target
             uint8_t pal = 0;                    // T8H on a target: alpha through the CLUT
-            uint8_t depthSrc = 0;               // texture is a depth buffer: 1 = 16-bit Z, 2 = 24-bit, 3 = 32-bit
-            uint8_t ta0 = 0, ta1 = 0, aem = 0;  // with depthSrc: TEXA, for the 16-bit expansion
             uint32_t clutTag = 0;               // with pal: which CLUT
             bool operator==(const DrawKey &o) const;
         };
@@ -139,11 +135,6 @@ namespace gles
         void ReadbackDepth(Depth &depth);
         void UploadTarget(Target &target);
         void BumpPages(uint32_t firstPage, uint32_t pageCount);
-        bool IsShuffle(const GSPrimitiveBatch &batch) const;
-        void SubmitShuffle(const GSPrimitiveBatch &batch);
-        void Relayout(Target &target, uint32_t newFbw);
-        void CopyToScratch(Target &target, uint32_t scratchTexture);
-        void BuildSwizzleTables();
         // 8 KB pages under a buffer of width fbw*64 and the given rows: 64x32 pixels in 32-bit formats, 64x64 in 16-bit ones.
         static uint32_t PagesOf(uint32_t fbw, uint32_t rows, uint32_t psm = 0u)
         {
@@ -165,13 +156,7 @@ namespace gles
 
         uint32_t m_program = 0, m_vbo = 0, m_vao = 0;
         uint32_t m_depthProgram = 0, m_emptyVao = 0, m_scratchTexture = 0, m_scratchFramebuffer = 0;
-        uint32_t m_scratchTexture2 = 0;                    // second copy, for shuffles between two frame buffers
-        uint32_t m_shuffleProgram = 0, m_relayoutProgram = 0;
-        uint32_t m_lut16 = 0, m_lut32 = 0;                 // CT16 <-> CT32 positions inside one 8 KB page
-        int m_uDepthScale = -1, m_uDepthMax = -1, m_uDepthSrc = -1, m_uTexa = -1;
-        int m_uShRect = -1, m_uShOffset = -1, m_uShMask = -1, m_uShTexa = -1, m_uShTcc = -1, m_uShVertexA = -1;
-        int m_uRlSrcFbw = -1, m_uRlDstFbw = -1;
-        uint8_t m_textureDepth = 0;                        // set by TextureFor: the texture is a depth buffer
+        int m_uDepthScale = -1, m_uDepthMax = -1, m_uTexAlpha = -1;
         int m_uTarget = -1, m_uTfx = -1, m_uTcc = -1, m_uTme = -1, m_uFge = -1, m_uFog = -1, m_uAte = -1,
             m_uAtst = -1, m_uAref = -1, m_uTexScale = -1, m_uTex = -1, m_uPal = -1;
         uint32_t m_clutTexture = 0, m_clutTextureTag = 0;  // 256x1 RGBA CLUT for T8H-on-target draws

@@ -1,0 +1,322 @@
+diff --git a/renderer/gles/gs_gles_backend.cpp b/renderer/gles/gs_gles_backend.cpp
+index 9f799fe..5d8c732 100644
+--- a/renderer/gles/gs_gles_backend.cpp
++++ b/renderer/gles/gs_gles_backend.cpp
+@@ -38,18 +38,23 @@ void main()
+ }
+ )";
+ 
+-        // Colours are stored as bytes (x/255); alpha as GS alpha with 0x80 = 1.0, so GL blending with SRC/DST alpha
+-        // matches the GS. A texture decoded from VRAM keeps raw alpha (a/255): uTexAlpha rescales it.
++        // Frame buffers keep the GS bytes as they are: colour and alpha x/255, so the alpha byte survives the PS2
++        // tricks that put other data there. Inside the shader alpha is in GS units (0x80 = 1.0). When blending uses
++        // the source alpha as its factor (uAlphaWeight), the shader outputs that factor and the alpha channel's
++        // blend (CONSTANT_ALPHA = 128/255, ZERO) turns it back into the byte.
+         const char *kFragmentShader = R"(#version 300 es
+ precision highp float;
++precision highp int;
+ in vec4 vColor;
+ in vec3 vStq;
+ in float vFog;
+ uniform sampler2D uTex;
++uniform highp sampler2D uDepthTex;
+ uniform sampler2D uClut;
+ uniform int uPal;
++uniform int uDepthSrc;
++uniform vec3 uTexa;          // ta0, ta1, aem (bytes)
+ uniform vec2 uTexScale;
+-uniform float uTexAlpha;
+ uniform int uTme;
+ uniform int uTfx;
+ uniform int uTcc;
+@@ -57,28 +62,39 @@ uniform int uFge;
+ uniform int uAte;
+ uniform int uAtst;
+ uniform float uAref;
++uniform int uAlphaWeight;
+ uniform vec3 uFog;
+ out vec4 oColor;
++
++vec4 depthTexel(vec2 uv)
++{
++    float d = texture(uDepthTex, uv).r;
++    if (uDepthSrc == 1)
++    {
++        uint z = uint(min(floor(d * 65536.0 + 0.5), 65535.0));
++        float a = (z & 0x8000u) != 0u ? uTexa.y : ((uTexa.z > 0.5 && (z & 0x7FFFu) == 0u) ? 0.0 : uTexa.x);
++        return vec4(float((z & 31u) << 3), float(((z >> 5) & 31u) << 3), float(((z >> 10) & 31u) << 3), a) / 255.0;
++    }
++    uint z = uint(min(floor(d * 16777216.0 + 0.5), 16777215.0));
++    float a = uDepthSrc == 2 ? ((uTexa.z > 0.5 && z == 0u) ? 0.0 : uTexa.x) : 0.0;
++    return vec4(float(z & 255u), float((z >> 8) & 255u), float((z >> 16) & 255u), a) / 255.0;
++}
++
+ void main()
+ {
+     vec3 rgb = vColor.rgb;
+     float a = vColor.a * (255.0 / 128.0);
+     if (uTme == 1)
+     {
++        vec2 uv = vStq.xy / vStq.z * uTexScale;
+         vec4 t;
+-        if (uPal == 1)
+-        {
+-            // T8H on a frame buffer: the pixel's alpha byte indexes the CLUT.
+-            float ta = texture(uTex, vStq.xy / vStq.z * uTexScale).a;
+-            int idx = int(clamp(floor(ta * 128.0 + 0.5), 0.0, 255.0));
+-            t = texelFetch(uClut, ivec2(idx, 0), 0);
+-            t.a *= 255.0 / 128.0;
+-        }
++        if (uDepthSrc != 0)
++            t = depthTexel(uv);
++        else if (uPal == 1) // T8H on a frame buffer: the pixel's alpha byte indexes the CLUT
++            t = texelFetch(uClut, ivec2(int(floor(texture(uTex, uv).a * 255.0 + 0.5)), 0), 0);
+         else
+-        {
+-            t = texture(uTex, vStq.xy / vStq.z * uTexScale);
+-            t.a *= uTexAlpha;
+-        }
++            t = texture(uTex, uv);
++        t.a *= 255.0 / 128.0;
+         if (uTfx == 0)      { rgb = rgb * t.rgb * (255.0 / 128.0); a = uTcc == 1 ? a * t.a : a; }
+         else if (uTfx == 1) { rgb = t.rgb; a = uTcc == 1 ? t.a : a; }
+         else if (uTfx == 2) { rgb = rgb * t.rgb * (255.0 / 128.0) + vColor.a; a = uTcc == 1 ? t.a + a : a; }
+@@ -99,18 +115,98 @@ void main()
+     }
+     if (uFge == 1)
+         rgb = mix(uFog, rgb, vFog);
+-    oColor = clamp(vec4(rgb, a), 0.0, 1.0);
++    oColor = vec4(clamp(rgb, 0.0, 1.0), uAlphaWeight == 1 ? clamp(a, 0.0, 1.0) : clamp(a * (128.0 / 255.0), 0.0, 1.0));
+ }
+ )";
+ 
+-        // Copies a depth texture out as bytes: the GS Z value, low byte in red.
+-        const char *kDepthVertexShader = R"(#version 300 es
++        // A full-target triangle for the passes below.
++        const char *kFullVertexShader = R"(#version 300 es
+ void main()
+ {
+     vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+     gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+ }
+ )";
++
++        // Texture shuffle: a sprite drawn into the CT16 view of a 32-bit frame buffer, sampling a CT16 view of a
++        // 32-bit frame buffer at a whole-pixel offset (PS2 games move bytes between channels this way). Run per
++        // 32-bit pixel: each of its two 16-bit halves is a CT16 pixel; the ones inside the sprite take the texel the
++        // GS would write there, through the frame buffer mask. uLut32 gives a 32-bit pixel's halves as CT16
++        // positions in the page (row + 32 for the high half); uLut16 the reverse.
++        const char *kShuffleFragmentShader = R"(#version 300 es
++precision highp float;
++precision highp int;
++uniform sampler2D uOld;
++uniform sampler2D uSrc;
++uniform highp usampler2D uLut16;
++uniform highp usampler2D uLut32;
++uniform ivec4 uRect;       // CT16 x0, y0, x1, y1 (exclusive), scissor included
++uniform ivec2 uOffset;     // source CT16 position = destination + offset
++uniform ivec2 uFbw;        // destination, source widths in 64-pixel units
++uniform uint uMask;        // 16-bit bits kept from the destination
++uniform vec3 uTexa;
++uniform int uTcc;
++uniform float uVertexA;
++out vec4 oColor;
++
++uvec4 bytesAt(sampler2D t, ivec2 p) { return uvec4(floor(texelFetch(t, p, 0) * 255.0 + 0.5)); }
++
++void main()
++{
++    ivec2 P = ivec2(gl_FragCoord.xy);
++    uvec4 old = bytesAt(uOld, P);
++    uint half_[2];
++    half_[0] = old.r | (old.g << 8);
++    half_[1] = old.b | (old.a << 8);
++    ivec2 page = ivec2(P.x >> 6, P.y >> 5);
++    bool any_ = false;
++    for (int h = 0; h < 2; ++h)
++    {
++        uvec2 q = texelFetch(uLut32, ivec2(P.x & 63, (P.y & 31) + 32 * h), 0).xy;
++        ivec2 Q = page * 64 + ivec2(q);
++        if (Q.x < uRect.x || Q.y < uRect.y || Q.x >= uRect.z || Q.y >= uRect.w)
++            continue;
++        any_ = true;
++        ivec2 S = Q + uOffset;
++        if (S.x < 0 || S.y < 0 || S.x >= uFbw.y * 64)
++        {
++            continue;
++        }
++        uvec3 l = texelFetch(uLut16, ivec2(S.x & 63, S.y & 63), 0).xyz;
++        ivec2 src = ivec2((S.x >> 6) * 64 + int(l.x), (S.y >> 6) * 32 + int(l.y));
++        uvec4 sb = bytesAt(uSrc, src);
++        uint v = l.z == 0u ? (sb.r | (sb.g << 8)) : (sb.b | (sb.a << 8));
++        // CT16 texel -> RGBA (TEXA) -> decal -> CT16 write
++        uint A = (v & 0x8000u) != 0u ? uint(uTexa.y) : ((uTexa.z > 0.5 && (v & 0x7FFFu) == 0u) ? 0u : uint(uTexa.x));
++        if (uTcc == 0) A = uint(uVertexA);
++        uint w = (v & 0x7FFFu) | ((A >> 7) << 15);
++        half_[h] = (half_[h] & uMask) | (w & ~uMask & 0xFFFFu);
++    }
++    if (!any_) discard;
++    oColor = vec4(float(half_[0] & 255u), float(half_[0] >> 8), float(half_[1] & 255u), float(half_[1] >> 8)) / 255.0;
++}
++)";
++
++        // The same 8 KB pages seen with another buffer width: page n moves from (n % old, n / old) to (n % new, n / new).
++        const char *kRelayoutFragmentShader = R"(#version 300 es
++precision highp float;
++precision highp int;
++uniform sampler2D uSrc;
++uniform int uSrcFbw;
++uniform int uDstFbw;
++out vec4 oColor;
++void main()
++{
++    ivec2 P = ivec2(gl_FragCoord.xy);
++    if (P.x >= uDstFbw * 64) discard;
++    int n = (P.y >> 5) * uDstFbw + (P.x >> 6);
++    ivec2 S = ivec2((n % uSrcFbw) * 64 + (P.x & 63), (n / uSrcFbw) * 32 + (P.y & 31));
++    if (S.y >= 512) discard;
++    oColor = texelFetch(uSrc, S, 0);
++}
++)";
++
++        // Copies a depth texture out as bytes: the GS Z value, low byte in red.
+         const char *kDepthFragmentShader = R"(#version 300 es
+ precision highp float;
+ precision highp int;
+@@ -211,6 +307,12 @@ void main()
+             glDeleteVertexArrays(1, &m_emptyVao);
+         if (m_depthProgram)
+             glDeleteProgram(m_depthProgram);
++        for (uint32_t p : {m_shuffleProgram, m_relayoutProgram})
++            if (p)
++                glDeleteProgram(p);
++        for (uint32_t t : {m_scratchTexture2, m_lut16, m_lut32})
++            if (t)
++                glDeleteTextures(1, &t);
+         for (auto &[key, fb] : m_framebuffers)
+             glDeleteFramebuffers(1, &fb);
+         if (m_vbo)
+@@ -261,7 +363,7 @@ void main()
+         m_program = link(kVertexShader, kFragmentShader, error);
+         if (!m_program)
+             return false;
+-        m_depthProgram = link(kDepthVertexShader, kDepthFragmentShader, error);
++        m_depthProgram = link(kFullVertexShader, kDepthFragmentShader, error);
+         if (!m_depthProgram)
+             return false;
+         glUseProgram(m_depthProgram);
+@@ -275,6 +377,37 @@ void main()
+         glGenFramebuffers(1, &m_scratchFramebuffer);
+         glBindFramebuffer(GL_FRAMEBUFFER, m_scratchFramebuffer);
+         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_scratchTexture, 0);
++        glGenTextures(1, &m_scratchTexture2);
++        glBindTexture(GL_TEXTURE_2D, m_scratchTexture2);
++        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, kTargetWidth, kTargetHeight);
++        for (uint32_t t : {m_scratchTexture, m_scratchTexture2})
++        {
++            glBindTexture(GL_TEXTURE_2D, t);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++        }
++        m_shuffleProgram = link(kFullVertexShader, kShuffleFragmentShader, error);
++        if (!m_shuffleProgram)
++            return false;
++        glUseProgram(m_shuffleProgram);
++        glUniform1i(glGetUniformLocation(m_shuffleProgram, "uOld"), 4);
++        glUniform1i(glGetUniformLocation(m_shuffleProgram, "uSrc"), 5);
++        glUniform1i(glGetUniformLocation(m_shuffleProgram, "uLut16"), 6);
++        glUniform1i(glGetUniformLocation(m_shuffleProgram, "uLut32"), 7);
++        m_uShRect = glGetUniformLocation(m_shuffleProgram, "uRect");
++        m_uShOffset = glGetUniformLocation(m_shuffleProgram, "uOffset");
++        m_uShMask = glGetUniformLocation(m_shuffleProgram, "uMask");
++        m_uShTexa = glGetUniformLocation(m_shuffleProgram, "uTexa");
++        m_uShTcc = glGetUniformLocation(m_shuffleProgram, "uTcc");
++        m_uShVertexA = glGetUniformLocation(m_shuffleProgram, "uVertexA");
++        m_relayoutProgram = link(kFullVertexShader, kRelayoutFragmentShader, error);
++        if (!m_relayoutProgram)
++            return false;
++        glUseProgram(m_relayoutProgram);
++        glUniform1i(glGetUniformLocation(m_relayoutProgram, "uSrc"), 4);
++        m_uRlSrcFbw = glGetUniformLocation(m_relayoutProgram, "uSrcFbw");
++        m_uRlDstFbw = glGetUniformLocation(m_relayoutProgram, "uDstFbw");
++        BuildSwizzleTables();
+         glUseProgram(m_program);
+         m_uTarget = glGetUniformLocation(m_program, "uTarget");
+         m_uTex = glGetUniformLocation(m_program, "uTex");
+@@ -288,7 +421,10 @@ void main()
+         m_uAref = glGetUniformLocation(m_program, "uAref");
+         m_uTexScale = glGetUniformLocation(m_program, "uTexScale");
+         m_uPal = glGetUniformLocation(m_program, "uPal");
+-        m_uTexAlpha = glGetUniformLocation(m_program, "uTexAlpha");
++        m_uTexAlpha = glGetUniformLocation(m_program, "uAlphaWeight"); // the member keeps its old name
++        m_uDepthSrc = glGetUniformLocation(m_program, "uDepthSrc");
++        m_uTexa = glGetUniformLocation(m_program, "uTexa");
++        glUniform1i(glGetUniformLocation(m_program, "uDepthTex"), 3);
+         glUniform1i(glGetUniformLocation(m_program, "uClut"), 1);
+         glGenTextures(1, &m_clutTexture);
+         glActiveTexture(GL_TEXTURE1);
+@@ -1061,7 +1197,14 @@ void main()
+                 glUniform2f(m_uTexScale, static_cast<float>(k.texW) / kTargetWidth, static_cast<float>(k.texH) / kTargetHeight);
+             else
+                 glUniform2f(m_uTexScale, 1.0f, 1.0f);
+-            glUniform1f(m_uTexAlpha, fromTarget ? 1.0f : 255.0f / 128.0f);
++            glUniform1i(m_uDepthSrc, k.depthSrc);
++            if (k.depthSrc)
++            {
++                glUniform3f(m_uTexa, k.ta0, k.ta1, k.aem);
++                glActiveTexture(GL_TEXTURE3);
++                glBindTexture(GL_TEXTURE_2D, id); // depth textures sample only with NEAREST
++                glActiveTexture(GL_TEXTURE0);
++            }
+         }
+     }
+ 
+diff --git a/renderer/gles/gs_gles_backend.h b/renderer/gles/gs_gles_backend.h
+index c2d81db..fde8122 100644
+--- a/renderer/gles/gs_gles_backend.h
++++ b/renderer/gles/gs_gles_backend.h
+@@ -43,6 +43,8 @@ namespace gles
+         uint32_t readbacks = 0;      // GPU images copied into the VRAM image for those draws (colour and depth)
+         uint32_t targetUploads = 0;  // VRAM images copied to the GPU after CPU draws or game uploads
+         uint32_t depthLost = 0;      // CPU draws that wrote depth: the GPU depth buffer does not see it yet
++        uint32_t shuffles = 0;       // CT16 views of 32-bit frame buffers redrawn on the GPU (texture shuffles)
++        uint32_t relayouts = 0;      // frame buffers re-laid out on the GPU for another width
+     };
+ 
+     class GSGlesBackend final : public GSRasterBackend, public GSBackendStateAccess
+@@ -122,6 +124,8 @@ namespace gles
+             uint8_t fogR = 0, fogG = 0, fogB = 0;
+             uint16_t texW = 1, texH = 1;        // GS texture size, to scale s,t when the texture is a target
+             uint8_t pal = 0;                    // T8H on a target: alpha through the CLUT
++            uint8_t depthSrc = 0;               // texture is a depth buffer: 1 = 16-bit Z, 2 = 24-bit, 3 = 32-bit
++            uint8_t ta0 = 0, ta1 = 0, aem = 0;  // with depthSrc: TEXA, for the 16-bit expansion
+             uint32_t clutTag = 0;               // with pal: which CLUT
+             bool operator==(const DrawKey &o) const;
+         };
+@@ -135,6 +139,11 @@ namespace gles
+         void ReadbackDepth(Depth &depth);
+         void UploadTarget(Target &target);
+         void BumpPages(uint32_t firstPage, uint32_t pageCount);
++        bool IsShuffle(const GSPrimitiveBatch &batch) const;
++        void SubmitShuffle(const GSPrimitiveBatch &batch);
++        void Relayout(Target &target, uint32_t newFbw);
++        void CopyToScratch(Target &target, uint32_t scratchTexture);
++        void BuildSwizzleTables();
+         // 8 KB pages under a buffer of width fbw*64 and the given rows: 64x32 pixels in 32-bit formats, 64x64 in 16-bit ones.
+         static uint32_t PagesOf(uint32_t fbw, uint32_t rows, uint32_t psm = 0u)
+         {
+@@ -156,7 +165,13 @@ namespace gles
+ 
+         uint32_t m_program = 0, m_vbo = 0, m_vao = 0;
+         uint32_t m_depthProgram = 0, m_emptyVao = 0, m_scratchTexture = 0, m_scratchFramebuffer = 0;
+-        int m_uDepthScale = -1, m_uDepthMax = -1, m_uTexAlpha = -1;
++        uint32_t m_scratchTexture2 = 0;                    // second copy, for shuffles between two frame buffers
++        uint32_t m_shuffleProgram = 0, m_relayoutProgram = 0;
++        uint32_t m_lut16 = 0, m_lut32 = 0;                 // CT16 <-> CT32 positions inside one 8 KB page
++        int m_uDepthScale = -1, m_uDepthMax = -1, m_uDepthSrc = -1, m_uTexa = -1;
++        int m_uShRect = -1, m_uShOffset = -1, m_uShMask = -1, m_uShTexa = -1, m_uShTcc = -1, m_uShVertexA = -1;
++        int m_uRlSrcFbw = -1, m_uRlDstFbw = -1;
++        uint8_t m_textureDepth = 0;                        // set by TextureFor: the texture is a depth buffer
+         int m_uTarget = -1, m_uTfx = -1, m_uTcc = -1, m_uTme = -1, m_uFge = -1, m_uFog = -1, m_uAte = -1,
+             m_uAtst = -1, m_uAref = -1, m_uTexScale = -1, m_uTex = -1, m_uPal = -1;
+         uint32_t m_clutTexture = 0, m_clutTextureTag = 0;  // 256x1 RGBA CLUT for T8H-on-target draws
