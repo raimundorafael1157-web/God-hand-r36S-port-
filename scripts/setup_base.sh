@@ -23,7 +23,8 @@ for patch in "$REPO"/patches/*.patch; do
     echo "applying $(basename "$patch")"
     git apply --whitespace=nowarn "$patch"
 done
-cp -r "$REPO/cmake" "$REPO/platform" "$DEST/"
+rm -rf "$DEST/renderer"   # a symlink in development checkouts
+cp -r "$REPO/cmake" "$REPO/platform" "$REPO/renderer" "$DEST/"
 curl -sSfL -o runtime/ps2xRuntime/include/sse2neon.h "$SSE2NEON_URL"
 echo "$SSE2NEON_SHA256  runtime/ps2xRuntime/include/sse2neon.h" | sha256sum -c -
 echo "base ready: $DEST (commit $BASE_COMMIT + $(ls "$REPO"/patches/*.patch | wc -l) patches)"

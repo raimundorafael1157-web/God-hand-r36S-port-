@@ -34,6 +34,7 @@ sh run_bench.sh "/roms/ps2/God Hand (USA).iso" cpu 600                # abertura
 PS2X_IOP_SPIN_US=200 sh run_bench.sh "/roms/ps2/God Hand (USA).iso" cpu 300 stage1.state   # IOP girando menos: menos calor?
 PS2X_MTVU=1 sh run_bench.sh "/roms/ps2/God Hand (USA).iso" cpu 300 stage1.state   # VU1 em outra thread
 sh run_bench.sh "/roms/ps2/God Hand (USA).iso" swgs 600
+sh run_gles.sh fight.gsr 3                                            # a GPU desenhando a luta gravada (renderer/gles)
 ```
 
-Mande de volta: `hw.txt` e os arquivos `bench-*.log`.
+Mande de volta: `hw.txt`, os arquivos `bench-*.log`, `gles-*.log` e um dos `frame-*.ppm` (para ver se a imagem saiu certa).

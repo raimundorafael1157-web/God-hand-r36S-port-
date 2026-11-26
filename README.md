@@ -25,7 +25,7 @@ estática do [God Hand Recompiled](https://github.com/LasVola/godhand-recomp).
 | VU1 pré-compilado | Feito: abertura de 10–23% para 93–100% de velocidade no PC |
 | Inventário do que o jogo desenha | Feito: 14 mil triângulos e ~500 lotes por quadro ([inventário](docs/renderizador-inventario.md)) |
 | Medição no R36S | Pendente: precisa do aparelho |
-| Renderizador para a Mali-G31 | Só se a medição der go |
+| Renderizador GLES 3 para a Mali-G31 | Primeira versão: reproduz a luta gravada com imagem igual à de referência ([detalhes](docs/renderizador-gles.md)); falta medir no aparelho |
 
 O critério de decisão está em [`docs/phase0-report.md`](docs/phase0-report.md): com os gráficos desligados, a
 velocidade precisa ficar perto de 100% nas cenas pesadas. Abaixo disso o jogo roda em câmera lenta, e nenhum
@@ -39,6 +39,7 @@ O projeto base fica intacto. Este repositório guarda só o que muda:
 patches/    mudanças sobre LasVola/godhand-recomp@14e956a, uma por assunto
 platform/   cabeçalhos SSE -> NEON (sse2neon) e o compilador zig para ARM64
 cmake/      toolchain do RK3326 (aarch64, glibc 2.30, Cortex-A35)
+renderer/   renderizador GLES 3 (backend do GS) e o programa que mede a GPU com uma luta gravada
 scripts/    montar a base, compilar, coletar dados do aparelho e medir
 docs/       plano, critérios, modo de medição, roteiro do teste no aparelho
 research/   trabalhos anteriores e como outros ports do R36S foram feitos

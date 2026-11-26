@@ -88,7 +88,16 @@ build)
         echo "aarch64-linux-gnu-strip not found (apt install binutils-aarch64-linux-gnu): copying the ~640 MB unstripped binary"
         cp build-rk3326/bin/godhand "$REPO/builds/rk3326/godhand"
     fi
-    cp "$REPO/scripts/run_bench.sh" "$REPO/scripts/collect_hw_info.sh" "$REPO/builds/rk3326/"
+    # The GLES renderer's replay benchmark (renderer/gles): measures the GPU on a recorded fight, see run_gles.sh.
+    cmake -S . -B build-rk3326-tools -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-zig-glibc230.cmake \
+        -DCMAKE_BUILD_TYPE=Release -DGODHAND_DEBUG_UI=OFF -DPLATFORM=DRM -DGODHAND_BUILD_TOOLS=ON
+    ninja -C build-rk3326-tools -j "$JOBS" gles_replay
+    if command -v aarch64-linux-gnu-strip >/dev/null 2>&1; then
+        aarch64-linux-gnu-strip -o "$REPO/builds/rk3326/gles_replay" build-rk3326-tools/runtime/ps2xTest/gles/gles_replay
+    else
+        cp build-rk3326-tools/runtime/ps2xTest/gles/gles_replay "$REPO/builds/rk3326/gles_replay"
+    fi
+    cp "$REPO/scripts/run_bench.sh" "$REPO/scripts/collect_hw_info.sh" "$REPO/scripts/run_gles.sh" "$REPO/builds/rk3326/"
     "$REPO/scripts/make_gl_stubs.sh" "$REPO/builds/rk3326/godhand" "$REPO/builds/rk3326/stubs"
     echo "binary: $REPO/builds/rk3326/godhand"
     ;;
