@@ -1,0 +1,33 @@
+diff --git a/godhand.ini b/godhand.ini
+index 0891cbb..eb168d3 100644
+--- a/godhand.ini
++++ b/godhand.ini
+@@ -33,7 +33,9 @@ Renderer=native
+ # shown 4:3 at up to 1920x1440 on a 2560x1440 screen (full 60 fps on an RTX 4070 Ti SUPER, 2026-10-17); 4 = 2048x1792,
+ # sharper but the GPU fell to ~45-50 frames/s in gameplay there. Above 1 the game's interlace flicker filter is left
+ # out of the flip copy (it would show every edge three times).
+-InternalResolution=3
++# RK3326 port: 1 by default and capped at 1, so a PC run renders what the R36S (640x480 screen) would. Above 1 only with
++# GODHAND_ALLOW_HIRES=1 in the environment.
++InternalResolution=1
+ # Ignored while Headless=1. StartFullscreen = borderless full screen (F11 switches back to a window); the picture keeps
+ # the PS2's 4:3 shape.
+ StartMaximized=0
+diff --git a/src/main.cpp b/src/main.cpp
+index ba27efa..6228e54 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -546,6 +546,13 @@ int main(int argc, char *argv[])
+     godhand::log::configureFromEnvironment();
+     for (const std::string &note : settingNotes)
+         GH_INFO(Boot, "settings: " << note);
++    // RK3326 port: never render above the R36S target, even with an old godhand.ini that still says 3. The PS2's own
++    // 512x448 frame (scale 1) is already below the R36S's 640x480 screen. GODHAND_ALLOW_HIRES=1 lifts the cap.
++    if (const char *scale = std::getenv("PS2X_GS_SCALE"); scale && std::atoi(scale) > 1 && !envFlag("GODHAND_ALLOW_HIRES", false))
++    {
++        std::fprintf(stderr, "[video] internal resolution %s capped to 1 (512x448, R36S target); GODHAND_ALLOW_HIRES=1 to lift\n", scale);
++        setEnv("PS2X_GS_SCALE", "1");
++    }
+     if (!padLayout.empty())
+         GH_INFO(Boot, "settings: " << padLayout.size() << " PS2X_PAD<n> line(s) in godhand.ini are not used: the layout lives in the "
+                                    "controls file (they only seed it when it is missing)");

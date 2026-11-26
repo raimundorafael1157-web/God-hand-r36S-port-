@@ -24,6 +24,7 @@ O repositório original fica intacto. `scripts/setup_base.sh` clona LasVola/godh
 | `0001-linux-build.patch` | `#include <cstddef>` faltando; `to_string` ambíguo no libc++; include do runtime para o código do port no Linux |
 | `0002-arm64-drm.patch` | raylib em KMS/DRM (sem X11/GLFW): define `PLATFORM_DRM`, controles GLFW desligados nesse modo |
 | `0003-bench-mode.patch` | `PS2X_BENCH=1` (sem janela, GPU e áudio; linha `[bench]` por segundo), `PS2X_GS_NULL=1` (GS descarta primitivas), save state em hora marcada |
+| `0004-r36s-resolution.patch` | resolução interna padrão 1x (512x448, abaixo da tela 640x480 do R36S) e travada em 1x, mesmo com `godhand.ini` antigo; `GODHAND_ALLOW_HIRES=1` libera |
 | `platform/arm64-intrin` | cabeçalhos SSE do x86 redirecionados para sse2neon (MIT, v1.8.0, sha256 conferido) |
 
 ## O que a linha `[bench]` mostra
