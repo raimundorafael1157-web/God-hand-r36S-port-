@@ -1,0 +1,23 @@
+diff --git a/runtime/ps2xTest/tools/gs_replay.cpp b/runtime/ps2xTest/tools/gs_replay.cpp
+index 677f4cd..c3bfe4e 100644
+--- a/runtime/ps2xTest/tools/gs_replay.cpp
++++ b/runtime/ps2xTest/tools/gs_replay.cpp
+@@ -681,6 +681,10 @@ int main(int argc, char **argv)
+ 
+     if (doSample)
+     {
++#if !defined(_WIN32)
++        std::cerr << "--sample needs Windows (gs_sampler.h); use perf on Linux\n";
++        return 2;
++#else
+         GSSampler sampler;
+         sampler.Start();
+         for (int run = 0; run < repeat; ++run)
+@@ -690,6 +694,7 @@ int main(int argc, char **argv)
+         }
+         sampler.StopAndReport(40);
+         return 0;
++#endif
+     }
+ 
+     int status = 0;

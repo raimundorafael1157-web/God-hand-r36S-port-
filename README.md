@@ -23,6 +23,7 @@ estática do [God Hand Recompiled](https://github.com/LasVola/godhand-recomp).
 | Jogo rodando no ARM64 (emulador qemu) | Feito: mesma sequência até a luta, sem erros |
 | Save states entre PC e ARM64 | Feito, nos dois sentidos |
 | VU1 pré-compilado | Feito: abertura de 10–23% para 93–100% de velocidade no PC |
+| Inventário do que o jogo desenha | Feito: 14 mil triângulos e ~500 lotes por quadro ([inventário](docs/renderizador-inventario.md)) |
 | Medição no R36S | Pendente: precisa do aparelho |
 | Renderizador para a Mali-G31 | Só se a medição der go |
 
@@ -42,6 +43,7 @@ scripts/    montar a base, compilar, coletar dados do aparelho e medir
 docs/       plano, critérios, modo de medição, roteiro do teste no aparelho
 research/   trabalhos anteriores e como outros ports do R36S foram feitos
 tests/      teste do módulo de medição
+tools/      análise das gravações do GS (o que o jogo desenha por quadro)
 ```
 
 | Patch | O que faz |
@@ -52,6 +54,7 @@ tests/      teste do módulo de medição
 | `0004-r36s-resolution` | Resolução interna fixa em 1x (512x448), abaixo da tela 640x480 do R36S |
 | `0005-game-frame-counter` | Conta os quadros do jogo pela função que monta a cópia de tela (o God Hand não troca o buffer de exibição) |
 | `0006-iop-spin` | Espera do IOP com a instrução `yield` no ARM e tempo ajustável (`PS2X_IOP_SPIN_US`) |
+| `0007-gs-replay-linux` | A ferramenta `gs_replay` (lê gravações do GS) compila no Linux |
 
 ## Compilar
 
