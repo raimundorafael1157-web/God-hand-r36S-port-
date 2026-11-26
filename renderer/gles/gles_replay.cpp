@@ -89,7 +89,7 @@ int main(int argc, char **argv)
     std::fprintf(stderr, "[gles] %s\n", context.description.c_str());
 
     std::vector<double> cpuMs, gpuMs, totalMs;
-    std::vector<double> draws, tris, decodes, switches;
+    std::vector<double> draws, tris, decodes, switches, lookups, hashedKb, applies, glCalls;
     for (int pass = 0; pass < repeat; ++pass)
     {
         GSRecording::Reader reader;
@@ -143,10 +143,12 @@ int main(int argc, char **argv)
                 const double cpu = ms(busy), gpu = ms(t2 - t1);
                 std::fprintf(stderr,
                              "[frame] pass=%d n=%u cpu=%.2fms finish=%.2fms prims=%u tris=%u skipped=%u draws=%u "
-                             "targets=%u decodes=%u (%llu KB) reuses=%u uploads=%u clears=%u cpuDraws=%u readbacks=%u targetUploads=%u depthLost=%u\n",
+                             "targets=%u decodes=%u (%llu KB) reuses=%u uploads=%u clears=%u cpuDraws=%u readbacks=%u targetUploads=%u depthLost=%u "
+                             "lookups=%u hashedKB=%llu applies=%u glStateCalls=%u\n",
                              pass + 1, frame, cpu, gpu, s.primitives, s.triangles, s.skipped, s.drawCalls,
                              s.targetSwitches, s.textureDecodes, static_cast<unsigned long long>(s.textureBytes / 1024u),
-                             s.textureReuses, s.uploads, s.clears, s.cpuDraws, s.readbacks, s.targetUploads, s.depthLost);
+                             s.textureReuses, s.uploads, s.clears, s.cpuDraws, s.readbacks, s.targetUploads, s.depthLost,
+                             s.textureLookups, static_cast<unsigned long long>(s.hashedBytes / 1024u), s.keyApplies, s.glStateCalls);
                 if (frame >= 2u) // the first frames decode every texture once
                 {
                     cpuMs.push_back(cpu);
@@ -156,6 +158,10 @@ int main(int argc, char **argv)
                     tris.push_back(s.triangles);
                     decodes.push_back(s.textureDecodes);
                     switches.push_back(s.targetSwitches);
+                    lookups.push_back(s.textureLookups);
+                    hashedKb.push_back(static_cast<double>(s.hashedBytes) / 1024.0);
+                    applies.push_back(s.keyApplies);
+                    glCalls.push_back(s.glStateCalls);
                 }
                 if (!dumpDir.empty() && pass == 0 && frame % static_cast<uint32_t>(dumpEvery) == 0u)
                 {
@@ -209,6 +215,11 @@ int main(int argc, char **argv)
                  totalMs.size(), percentile(cpuMs, 0.5), percentile(cpuMs, 0.95), percentile(gpuMs, 0.5),
                  percentile(gpuMs, 0.95), percentile(totalMs, 0.5), percentile(totalMs, 0.95), percentile(draws, 0.5),
                  percentile(tris, 0.5), percentile(decodes, 0.5), percentile(switches, 0.5));
+    // The backend's CPU-side work, exact per frame (any GPU, any machine): what the optimisations are measured by.
+    std::fprintf(stderr,
+                 "[gles-cpu-work] per frame, median: texture lookups=%.0f | VRAM hashed=%.0f KB | state applies=%.0f | "
+                 "GL state calls=%.0f\n",
+                 percentile(lookups, 0.5), percentile(hashedKb, 0.5), percentile(applies, 0.5), percentile(glCalls, 0.5));
     context.Destroy();
     return 0;
 }

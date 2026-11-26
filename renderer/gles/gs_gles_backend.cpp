@@ -648,6 +648,7 @@ void main()
 
     uint32_t GSGlesBackend::TextureFor(const GSDrawState &state)
     {
+        ++m_stats.textureLookups;
         const GSTex0Reg &tex0 = state.context.tex0;
         const uint32_t w = std::min<uint32_t>(1024u, std::max<uint32_t>(1u, state.textureWidth));
         const uint32_t h = std::min<uint32_t>(1024u, std::max<uint32_t>(1u, state.textureHeight));
@@ -688,6 +689,7 @@ void main()
         // each frame and mostly writes back the same bytes: compare what is there now with what was decoded.
         const uint64_t content = m_vram ? hashBytes(m_vram + static_cast<size_t>(first) * 8192u,
                                                     static_cast<size_t>(count) * 8192u, 0x7Eu) : 0u;
+        m_stats.hashedBytes += static_cast<uint64_t>(count) * 8192u;
         if (t.id && clutSame && content == t.contentHash && t.width == w && t.height == h)
         {
             t.generation = m_genCounter;
@@ -986,6 +988,7 @@ void main()
 
     void GSGlesBackend::ApplyKey(const DrawKey &k)
     {
+        ++m_stats.keyApplies;
         Target &target = TargetFor(k.fbp, k.fbw);
         if (!target.drawnOnGpu)
             UploadTarget(target);
@@ -993,31 +996,34 @@ void main()
         const uint32_t fb = FramebufferFor(target, (k.zte && (k.zbp || !k.zmsk)) ? depth : 0u);
         if (fb != m_boundFramebuffer)
         {
-            glBindFramebuffer(GL_FRAMEBUFFER, fb);
-            glViewport(0, 0, static_cast<GLsizei>(target.width), static_cast<GLsizei>(target.height));
+            ++m_stats.glStateCalls; glBindFramebuffer(GL_FRAMEBUFFER, fb);
+            ++m_stats.glStateCalls; glViewport(0, 0, static_cast<GLsizei>(target.width), static_cast<GLsizei>(target.height));
             m_boundFramebuffer = fb;
             ++m_stats.targetSwitches;
         }
-        glScissor(k.scissor[0], k.scissor[2], k.scissor[1] - k.scissor[0] + 1, k.scissor[3] - k.scissor[2] + 1);
+        ++m_stats.glStateCalls; glScissor(k.scissor[0], k.scissor[2], k.scissor[1] - k.scissor[0] + 1, k.scissor[3] - k.scissor[2] + 1);
 
         if (k.zte && !debugFlag('d'))
         {
-            glEnable(GL_DEPTH_TEST);
+            ++m_stats.glStateCalls; glEnable(GL_DEPTH_TEST);
             static const GLenum funcs[4] = {GL_NEVER, GL_ALWAYS, GL_GEQUAL, GL_GREATER};
-            glDepthFunc(funcs[k.ztst & 3u]);
-            glDepthMask(k.zmsk ? GL_FALSE : GL_TRUE);
+            ++m_stats.glStateCalls; glDepthFunc(funcs[k.ztst & 3u]);
+            ++m_stats.glStateCalls; glDepthMask(k.zmsk ? GL_FALSE : GL_TRUE);
         }
         else
+        {
+            ++m_stats.glStateCalls;
             glDisable(GL_DEPTH_TEST);
+        }
 
         if (k.abe && !debugFlag('b'))
         {
-            glEnable(GL_BLEND);
+            ++m_stats.glStateCalls; glEnable(GL_BLEND);
             const uint8_t A = k.blend[0], B = k.blend[1], C = k.blend[2], D = k.blend[3];
             const GLenum factor = C == 0u ? GL_SRC_ALPHA : (C == 1u ? GL_DST_ALPHA : GL_CONSTANT_ALPHA);
             const GLenum oneMinus = C == 0u ? GL_ONE_MINUS_SRC_ALPHA : (C == 1u ? GL_ONE_MINUS_DST_ALPHA : GL_ONE_MINUS_CONSTANT_ALPHA);
             if (C == 2u)
-                glBlendColor(0.0f, 0.0f, 0.0f, std::min(1.0f, static_cast<float>(k.fix) / 128.0f));
+                ++m_stats.glStateCalls, glBlendColor(0.0f, 0.0f, 0.0f, std::min(1.0f, static_cast<float>(k.fix) / 128.0f));
             GLenum src = GL_SRC_ALPHA, dst = GL_ONE_MINUS_SRC_ALPHA, eq = GL_FUNC_ADD;
             if (A == B)
             {
@@ -1030,38 +1036,42 @@ void main()
             else if (A == 2u && B == 0u && D == 1u) { src = factor; dst = GL_ONE; eq = GL_FUNC_REVERSE_SUBTRACT; } // Cd-Cs*C
             else if (A == 1u && B == 0u && D == 0u) { src = oneMinus; dst = factor; }     // (Cd-Cs)*C+Cs
             else if (A == 1u && B == 2u && D == 0u) { src = GL_ONE; dst = factor; }       // Cd*C+Cs
-            glBlendEquation(eq);
-            glBlendFunc(src, dst);
+            ++m_stats.glStateCalls; glBlendEquation(eq);
+            ++m_stats.glStateCalls; glBlendFunc(src, dst);
         }
         else
+        {
+            ++m_stats.glStateCalls;
             glDisable(GL_BLEND);
-        glColorMask((k.colorMask & 1u) != 0u, (k.colorMask & 2u) != 0u, (k.colorMask & 4u) != 0u, (k.colorMask & 8u) != 0u);
+        }
+        ++m_stats.glStateCalls; glColorMask((k.colorMask & 1u) != 0u, (k.colorMask & 2u) != 0u, (k.colorMask & 4u) != 0u, (k.colorMask & 8u) != 0u);
 
-        glUniform1i(m_uTme, k.tme);
-        glUniform1i(m_uPal, k.pal);
-        glUniform1i(m_uTfx, k.tfx);
-        glUniform1i(m_uTcc, k.tcc);
-        glUniform1i(m_uFge, k.fge);
-        glUniform3f(m_uFog, k.fogR / 255.0f, k.fogG / 255.0f, k.fogB / 255.0f);
-        glUniform1i(m_uAte, k.ate);
-        glUniform1i(m_uAtst, k.atst);
-        glUniform1f(m_uAref, static_cast<float>(k.aref));
+        ++m_stats.glStateCalls; glUniform1i(m_uTme, k.tme);
+        ++m_stats.glStateCalls; glUniform1i(m_uPal, k.pal);
+        ++m_stats.glStateCalls; glUniform1i(m_uTfx, k.tfx);
+        ++m_stats.glStateCalls; glUniform1i(m_uTcc, k.tcc);
+        ++m_stats.glStateCalls; glUniform1i(m_uFge, k.fge);
+        ++m_stats.glStateCalls; glUniform3f(m_uFog, k.fogR / 255.0f, k.fogG / 255.0f, k.fogB / 255.0f);
+        ++m_stats.glStateCalls; glUniform1i(m_uAte, k.ate);
+        ++m_stats.glStateCalls; glUniform1i(m_uAtst, k.atst);
+        ++m_stats.glStateCalls; glUniform1f(m_uAref, static_cast<float>(k.aref));
         if (k.tme)
         {
             const bool fromTarget = (k.texture & 0x80000000u) != 0u;
             const uint32_t id = k.texture & 0x7FFFFFFFu;
-            glBindTexture(GL_TEXTURE_2D, id);
+            ++m_stats.glStateCalls; glBindTexture(GL_TEXTURE_2D, id);
             const GLint filter = k.linear ? GL_LINEAR : GL_NEAREST;
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, fromTarget ? GL_CLAMP_TO_EDGE : glWrap(k.wrapS));
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, fromTarget ? GL_CLAMP_TO_EDGE : glWrap(k.wrapT));
+            ++m_stats.glStateCalls; glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+            ++m_stats.glStateCalls; glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+            ++m_stats.glStateCalls; glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, fromTarget ? GL_CLAMP_TO_EDGE : glWrap(k.wrapS));
+            ++m_stats.glStateCalls; glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, fromTarget ? GL_CLAMP_TO_EDGE : glWrap(k.wrapT));
             // s, t are normalised to the GS texture (tw x th); a target is 1024x512, so they shrink to its part.
+            ++m_stats.glStateCalls;
             if (fromTarget)
                 glUniform2f(m_uTexScale, static_cast<float>(k.texW) / kTargetWidth, static_cast<float>(k.texH) / kTargetHeight);
             else
                 glUniform2f(m_uTexScale, 1.0f, 1.0f);
-            glUniform1f(m_uTexAlpha, fromTarget ? 1.0f : 255.0f / 128.0f);
+            ++m_stats.glStateCalls; glUniform1f(m_uTexAlpha, fromTarget ? 1.0f : 255.0f / 128.0f);
         }
     }
 

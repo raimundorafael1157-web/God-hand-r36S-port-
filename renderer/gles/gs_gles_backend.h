@@ -43,6 +43,12 @@ namespace gles
         uint32_t readbacks = 0;      // GPU images copied into the VRAM image for those draws (colour and depth)
         uint32_t targetUploads = 0;  // VRAM images copied to the GPU after CPU draws or game uploads
         uint32_t depthLost = 0;      // CPU draws that wrote depth: the GPU depth buffer does not see it yet
+        // CPU-side work of the backend, counted exactly (the same on every run and every GPU): what the R36S pays in
+        // CPU time scales with these, whatever a PC's GPU driver does.
+        uint32_t textureLookups = 0; // TextureFor calls (one per textured primitive before caching)
+        uint64_t hashedBytes = 0;    // VRAM bytes hashed to check whether a texture changed
+        uint32_t keyApplies = 0;     // ApplyKey calls (GL state set for a new batch)
+        uint32_t glStateCalls = 0;   // GL state calls those made (uniforms, blend, depth, texture parameters...)
     };
 
     class GSGlesBackend final : public GSRasterBackend, public GSBackendStateAccess
