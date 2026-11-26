@@ -1,0 +1,17 @@
+diff --git a/src/main.cpp b/src/main.cpp
+index 6228e54..c28b614 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -730,6 +730,12 @@ int main(int argc, char *argv[])
+ #endif
+         godhand::installDllLoadLogger(runtime); // observe only: [DLL] lines + GODHAND_DLL_LOG CSV
+         godhand::installHiresFlipCopy(runtime); // PS2X_GS_SCALE > 1 only: flip copy without the flicker filter
++        // RK3326 port: God Hand never swaps DISPFB; each drawn frame ends with func_0030B870 building the flip copy (see
++        // installHiresFlipCopy), so one call = one game frame. Feeds "Game N FPS" (F3) and the bench's frames/s.
++        if (runtime.hasFunction(0x30B870u))
++            godhand::FunctionHooks::instance().observeEntry(0x30B870u, "game_frame", [](uint8_t *, R5900Context *, PS2Runtime *) {
++                ps2_host_display::noteGameFrame();
++            });
+         godhand::button_prompts::install(runtime); // the button prompts show the bound keys (GODHAND_PROMPTS=0: PS2 art)
+         godhand::installMovieWatchdog(runtime); // sweep R3: ending/movie-list movie polls cannot spin forever
+         // TODO(godhand): a "game_frame" observer on God Hand's main-loop function (ps2_host_display::noteGameFrame for the

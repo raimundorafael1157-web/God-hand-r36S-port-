@@ -50,10 +50,10 @@ index 5879cff..f415cd4 100644
      const char *gpu = std::getenv("PS2X_GS_GPU");
 diff --git a/runtime/ps2xRuntime/src/lib/ps2_bench.h b/runtime/ps2xRuntime/src/lib/ps2_bench.h
 new file mode 100644
-index 0000000..8fead07
+index 0000000..842f82d
 --- /dev/null
 +++ b/runtime/ps2xRuntime/src/lib/ps2_bench.h
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,303 @@
 +#pragma once
 +// RK3326 port: the measurement loop of PS2X_BENCH=1 (ps2_runtime.cpp, PS2Runtime::run). It replaces the present loop
 +// when there is no window: nothing is drawn, the game thread runs exactly as in a normal run, and this thread only
@@ -61,12 +61,14 @@ index 0000000..8fead07
 +//
 +// What each number is:
 +//   fields/s  - emulated vsync fields per second (the EE scheduler's vsync tick); 59.94 = PS2 real time.
++//   frames/s  - game frames per second, from the game's own per-frame hook (ps2_host_display::noteGameFrame; God
++//               Hand: its flip copy builder). 0 when the port installs no such hook: then read flips/s or disp/s.
++//   worst     - the longest gap between two game frames in the window (two flips when there is no frame hook), ms.
 +//   flips/s   - changes of the displayed frame buffer's base page (FBP, bits 0-8 of GS DISPFB1/DISPFB2), sampled
 +//               every 2 ms. A double-buffered game swaps FBP once per game frame, so this is its own frame rate.
 +//   disp/s    - changes of anything in DISPFB1/DISPFB2 (FBP or the DBX/DBY offset). An interlaced game moves DBY every
 +//               field, so disp/s can read 60 while flips/s reads the real 30. If flips/s is 0 and disp/s is not, the
 +//               game flips by offset inside one buffer: then disp/s is the frame rate.
-+//   worst     - the longest gap between two flips in the window, in ms.
 +//   cpu       - process CPU time / wall time (100% = one full core; 400% = all four RK3326 cores).
 +//   threads   - CPU share of each busy thread (GameThread = recompiled EE code; VUThread, GSThread, GIFThread...).
 +//   rss       - resident memory in MB (/proc/self/statm).
@@ -217,8 +219,9 @@ index 0000000..8fead07
 +
 +    // onPoll() runs every ~16 ms (ps2_runtime.cpp: input sampling, so PS2X_PAD_SCRIPT / PS2X_PAD_FIFO still drive the
 +    // game with no window, as the present loop would).
-+    template <typename Runtime, typename StopFn, typename SecondFn, typename PollFn>
-+    void runLoop(Runtime &runtime, StopFn &&shouldStop, SecondFn &&onSecond, PollFn &&onPoll)
++    // gameFrames() returns the running count of game frames (0 forever when the port has no frame hook).
++    template <typename Runtime, typename StopFn, typename SecondFn, typename PollFn, typename FramesFn>
++    void runLoop(Runtime &runtime, StopFn &&shouldStop, SecondFn &&onSecond, PollFn &&onPoll, FramesFn &&gameFrames)
 +    {
 +        using Clock = std::chrono::steady_clock;
 +        const double warmup = [] {
@@ -238,11 +241,14 @@ index 0000000..8fead07
 +        uint64_t lastDispfb1 = __atomic_load_n(&gs.dispfb1, __ATOMIC_RELAXED);
 +        uint64_t lastDispfb2 = __atomic_load_n(&gs.dispfb2, __ATOMIC_RELAXED);
 +        uint32_t flips = 0, dispChanges = 0;
++        uint64_t lastFrames = gameFrames(), windowFrames = lastFrames;
++        auto lastFrame = start;
++        double worstFrameMs = 0.0;
 +        constexpr uint64_t kFbpMask = 0x1FFu;
 +        double worstGapMs = 0.0;
 +        double cpuStart = processCpuSeconds();
 +        auto threadsStart = sampleThreads();
-+        std::vector<double> fieldRates, flipRates, dispRates, worstGaps, rssValues;
++        std::vector<double> fieldRates, frameRates, flipRates, dispRates, worstGaps, rssValues;
 +        double cpuSum = 0.0;
 +
 +        std::fprintf(stderr, "[bench] started; warmup %.0f s excluded from the summary\n", warmup);
@@ -258,6 +264,12 @@ index 0000000..8fead07
 +            }
 +            const uint64_t d1 = __atomic_load_n(&gs.dispfb1, __ATOMIC_RELAXED);
 +            const uint64_t d2 = __atomic_load_n(&gs.dispfb2, __ATOMIC_RELAXED);
++            if (const uint64_t f = gameFrames(); f != lastFrames)
++            {
++                lastFrames = f;
++                worstFrameMs = std::max(worstFrameMs, std::chrono::duration<double, std::milli>(now - lastFrame).count());
++                lastFrame = now;
++            }
 +            if (d1 != lastDispfb1 || d2 != lastDispfb2)
 +            {
 +                ++dispChanges;
@@ -280,6 +292,8 @@ index 0000000..8fead07
 +            const double fieldRate = static_cast<double>(field - startField) / seconds;
 +            const double flipRate = static_cast<double>(flips) / seconds;
 +            const double dispRate = static_cast<double>(dispChanges) / seconds;
++            const double frameRate = static_cast<double>(lastFrames - windowFrames) / seconds;
++            const double worstMs = lastFrames != 0u ? worstFrameMs : worstGapMs;
 +            const double cpu = 100.0 * (cpuNow - cpuStart) / seconds;
 +            const double rss = rssMegabytes();
 +            const double t = std::chrono::duration<double>(now - start).count();
@@ -296,16 +310,17 @@ index 0000000..8fead07
 +                std::snprintf(part, sizeof(part), " %s=%.0f%%", sample.name.c_str(), share);
 +                threadText += part;
 +            }
-+            std::fprintf(stderr, "[bench] t=%.0f fields/s=%.1f speed=%.0f%% flips/s=%.1f disp/s=%.1f worst=%.0fms cpu=%.0f%% rss=%.0fMB mhz=%d temp=%dC |%s\n",
-+                         t, fieldRate, 100.0 * fieldRate / 59.94, flipRate, dispRate, worstGapMs, cpu, rss, cpuMhz(), hottestC(), threadText.c_str());
++            std::fprintf(stderr, "[bench] t=%.0f fields/s=%.1f speed=%.0f%% frames/s=%.1f flips/s=%.1f disp/s=%.1f worst=%.0fms cpu=%.0f%% rss=%.0fMB mhz=%d temp=%dC |%s\n",
++                         t, fieldRate, 100.0 * fieldRate / 59.94, frameRate, flipRate, dispRate, worstMs, cpu, rss, cpuMhz(), hottestC(), threadText.c_str());
 +
 +            onSecond(t);
 +            if (t >= warmup)
 +            {
 +                fieldRates.push_back(fieldRate);
 +                flipRates.push_back(flipRate);
++                frameRates.push_back(frameRate);
 +                dispRates.push_back(dispRate);
-+                worstGaps.push_back(worstGapMs);
++                worstGaps.push_back(worstMs);
 +                rssValues.push_back(rss);
 +                cpuSum += cpu;
 +            }
@@ -313,6 +328,8 @@ index 0000000..8fead07
 +            startField = field;
 +            flips = 0;
 +            dispChanges = 0;
++            windowFrames = lastFrames;
++            worstFrameMs = 0.0;
 +            worstGapMs = 0.0;
 +            cpuStart = cpuNow;
 +            threadsStart = threadsNow;
@@ -333,14 +350,15 @@ index 0000000..8fead07
 +        // speed is the number that decides: below ~100% the game runs in slow motion (PS2 games step their logic per
 +        // frame), it does not drop frames to keep up.
 +        std::fprintf(stderr,
-+                     "[bench-summary] seconds=%.0f speed avg=%.0f%% p5=%.0f%% | fields/s avg=%.1f | flips/s avg=%.1f p5=%.1f | disp/s avg=%.1f | worst gap p95=%.0fms max=%.0fms | cpu avg=%.0f%% | rss max=%.0fMB\n",
++                     "[bench-summary] seconds=%.0f speed avg=%.0f%% p5=%.0f%% | fields/s avg=%.1f | frames/s avg=%.1f p5=%.1f | flips/s avg=%.1f p5=%.1f | disp/s avg=%.1f | worst gap p95=%.0fms max=%.0fms | cpu avg=%.0f%% | rss max=%.0fMB\n",
 +                     n, 100.0 * mean(fieldRates) / 59.94, 100.0 * percentile(fieldRates, 0.05) / 59.94, mean(fieldRates),
++                     mean(frameRates), percentile(frameRates, 0.05),
 +                     mean(flipRates), percentile(flipRates, 0.05), mean(dispRates), percentile(worstGaps, 0.95),
 +                     percentile(worstGaps, 1.0), cpuSum / n, percentile(rssValues, 1.0));
 +    }
 +}
 diff --git a/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp b/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp
-index ebcc0ae..c4f558d 100644
+index ebcc0ae..28042d0 100644
 --- a/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp
 +++ b/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp
 @@ -49,6 +49,8 @@ namespace ps2_stubs
@@ -390,7 +408,7 @@ index ebcc0ae..c4f558d 100644
  #endif
          const bool coreReady = syncCoreSubsystems();
          GSSharedPresent::RestoreHostContext();
-@@ -3018,6 +3037,36 @@ void PS2Runtime::run()
+@@ -3018,6 +3037,37 @@ void PS2Runtime::run()
      uint32_t lastHashHeight = 0u;
      bool hadHash = false;
      ps2_host_display::FpsOverlay fpsOverlay;
@@ -421,13 +439,14 @@ index ebcc0ae..c4f558d 100644
 +                    ps2x::savestate::requestSave(saveState);
 +                }
 +            },
-+            [] { ps2_host_input::sample(); });
++            [] { ps2_host_input::sample(); },
++            [] { return ps2_host_display::gameFrames.load(std::memory_order_relaxed); });
 +    }
 +    else
      while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
      {
          if (IsWindowMinimized())
-@@ -3285,8 +3334,11 @@ void PS2Runtime::run()
+@@ -3285,8 +3335,11 @@ void PS2Runtime::run()
      if (frameTex.id != 0)
          UnloadTexture(frameTex);
      GSSharedPresent::ShutdownHost();

@@ -47,6 +47,7 @@ tests/      teste do módulo de medição
 | `0002-arm64-drm` | raylib direto em KMS/DRM, sem X11 |
 | `0003-bench-mode` | Medição sem janela: velocidade, FPS do jogo, CPU por thread, memória, clock e temperatura |
 | `0004-r36s-resolution` | Resolução interna fixa em 1x (512x448), abaixo da tela 640x480 do R36S |
+| `0005-game-frame-counter` | Conta os quadros do jogo pela função que monta a cópia de tela (o God Hand não troca o buffer de exibição) |
 
 ## Compilar
 
