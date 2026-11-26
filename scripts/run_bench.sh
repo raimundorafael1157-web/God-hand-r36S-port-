@@ -14,6 +14,7 @@ ISO=${1:?uso: sh run_bench.sh <iso> [cpu|swgs] [segundos] [save-state]}
 MODE=${2:-cpu}
 SECONDS_LIMIT=${3:-600}
 STATE=${4:-}
+case "$STATE" in ""|/*) ;; *) STATE="$(pwd)/$STATE";; esac
 LOG="$DIR/bench-$MODE-$(date +%Y%m%d-%H%M%S).log"
 
 {

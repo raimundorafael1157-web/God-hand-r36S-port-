@@ -1,8 +1,8 @@
 diff --git a/runtime/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/runtime/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
-index 5879cff..f415cd4 100644
+index 5879cff..fe99008 100644
 --- a/runtime/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
 +++ b/runtime/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
-@@ -152,8 +152,45 @@ GSThreadedBackend::~GSThreadedBackend()
+@@ -152,8 +152,52 @@ GSThreadedBackend::~GSThreadedBackend()
          m_worker.join();
  }
  
@@ -42,8 +42,15 @@ index 5879cff..f415cd4 100644
  {
 +    if (const char *nullGs = std::getenv("PS2X_GS_NULL"); nullGs && *nullGs == '1')
 +    {
-+        std::fprintf(stderr, "[gs] PS2X_GS_NULL=1: primitives are dropped (measurement build, no picture)\n");
-+        return std::make_unique<GSNullRasterBackend>();
++        // On its own GS thread like the normal backends (PS2X_GS_THREAD=0: on the game thread), so the VRAM uploads it
++        // still does are not charged to the game logic the bench measures.
++        const char *thread = std::getenv("PS2X_GS_THREAD");
++        const bool threaded = !(thread && *thread == '0');
++        std::fprintf(stderr, "[gs] PS2X_GS_NULL=1: primitives are dropped (measurement build, no picture), %s\n",
++                     threaded ? "on the GS thread" : "on the game thread");
++        if (!threaded)
++            return std::make_unique<GSNullRasterBackend>();
++        return std::make_unique<GSThreadedBackend>(std::make_unique<GSNullRasterBackend>());
 +    }
      const char *value = std::getenv("PS2X_GS_THREAD");
      const bool enabled = (value && *value) ? *value != '0' : s_enabledByDefault.load();
@@ -358,7 +365,7 @@ index 0000000..842f82d
 +    }
 +}
 diff --git a/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp b/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp
-index ebcc0ae..28042d0 100644
+index ebcc0ae..4874d61 100644
 --- a/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp
 +++ b/runtime/ps2xRuntime/src/lib/ps2_runtime.cpp
 @@ -49,6 +49,8 @@ namespace ps2_stubs
@@ -408,7 +415,7 @@ index ebcc0ae..28042d0 100644
  #endif
          const bool coreReady = syncCoreSubsystems();
          GSSharedPresent::RestoreHostContext();
-@@ -3018,6 +3037,37 @@ void PS2Runtime::run()
+@@ -3018,8 +3037,56 @@ void PS2Runtime::run()
      uint32_t lastHashHeight = 0u;
      bool hadHash = false;
      ps2_host_display::FpsOverlay fpsOverlay;
@@ -421,6 +428,9 @@ index ebcc0ae..28042d0 100644
 +        const char *saveState = std::getenv("PS2X_BENCH_SAVE_STATE");
 +        const double loadAt = std::getenv("PS2X_BENCH_LOAD_AT") ? std::atof(std::getenv("PS2X_BENCH_LOAD_AT")) : 15.0;
 +        const double saveAt = std::getenv("PS2X_BENCH_SAVE_AT") ? std::atof(std::getenv("PS2X_BENCH_SAVE_AT")) : 60.0;
++        // PS2X_BENCH_SAVE_FIELD=<vsync field>: save when the game reaches that field instead (the same point of the game
++        // on any machine speed; checked once a second, so within ~60 fields).
++        const uint64_t saveField = std::getenv("PS2X_BENCH_SAVE_FIELD") ? std::strtoull(std::getenv("PS2X_BENCH_SAVE_FIELD"), nullptr, 10) : 0u;
 +        bool loaded = false, saved = false;
 +        ps2x_bench::runLoop(
 +            *this, [&] { return isStopRequested() || gameThreadFinished.load(std::memory_order_acquire); },
@@ -432,7 +442,8 @@ index ebcc0ae..28042d0 100644
 +                    std::cerr << "[bench] loading save state " << loadState << " at t=" << t << std::endl;
 +                    ps2x::savestate::requestLoad(loadState);
 +                }
-+                if (saveState && *saveState && !saved && t >= saveAt)
++                if (saveState && *saveState && !saved &&
++                    (saveField != 0u ? eeScheduler().currentVSyncTick() >= saveField : t >= saveAt))
 +                {
 +                    saved = true;
 +                    std::cerr << "[bench] saving save state " << saveState << " at t=" << t << std::endl;
@@ -445,8 +456,23 @@ index ebcc0ae..28042d0 100644
 +    else
      while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
      {
++        // RK3326 port: PS2X_BENCH_LOAD_STATE also works with a window (seeing a bench state; PS2X_BENCH_LOAD_AT s).
++        {
++            static const char *windowLoadState = std::getenv("PS2X_BENCH_LOAD_STATE");
++            static const double windowLoadAt = std::getenv("PS2X_BENCH_LOAD_AT") ? std::atof(std::getenv("PS2X_BENCH_LOAD_AT")) : 15.0;
++            static bool windowLoaded = false;
++            if (windowLoadState && *windowLoadState && !windowLoaded &&
++                std::chrono::duration<double>(PresentClock::now() - presentStart).count() >= windowLoadAt)
++            {
++                windowLoaded = true;
++                std::cerr << "[bench] loading save state " << windowLoadState << " (window)" << std::endl;
++                ps2x::savestate::requestLoad(windowLoadState);
++            }
++        }
          if (IsWindowMinimized())
-@@ -3285,8 +3335,11 @@ void PS2Runtime::run()
+         {
+             PollInputEvents();
+@@ -3285,8 +3352,11 @@ void PS2Runtime::run()
      if (frameTex.id != 0)
          UnloadTexture(frameTex);
      GSSharedPresent::ShutdownHost();

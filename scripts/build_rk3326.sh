@@ -2,6 +2,7 @@
 # Builds godhand for the R36S (aarch64, glibc 2.30, raylib on KMS/DRM) from source/godhand-recomp.
 #   scripts/build_rk3326.sh generate <iso>   # once per disc: game code from YOUR disc (Linux x86_64 recompiler)
 #   scripts/build_rk3326.sh vu1 <iso>        # VU1 microcode ahead of time (x86_64 run of the game, ~5 min of play)
+#   scripts/build_rk3326.sh state <iso>      # save state in the first fight of stage 1 -> builds/rk3326/stage1.state
 #   scripts/build_rk3326.sh build            # the ARM64 binary -> builds/rk3326/godhand
 # Generated code stays in source/ (git-ignored): never commit it, it is derived from the game.
 set -eu
@@ -54,6 +55,20 @@ vu1)
     ./build-host/runtime/ps2xTest/vu1_recomp "$CAP" generated/vu1
     echo "VU1 programs compiled: $(ls "$CAP"/vu1_*.bin | wc -l); run 'build_rk3326.sh build' next"
     ;;
+state)
+    # A save state inside the first fight of stage 1 (Gene against three thugs), made on the PC build from the vu1 step.
+    # Save states load across x86_64 and ARM64 (checked both ways). It holds the game's RAM: keep it out of git.
+    ISO=${2:?usage: build_rk3326.sh state <path-to-your-SLUS-21503.iso>}
+    case "$ISO" in /*) ;; *) ISO="$CALLER_DIR/$ISO";; esac
+    [ -x build-x64/bin/godhand ] || { echo "no PC build: run 'build_rk3326.sh vu1 <iso>' first"; exit 1; }
+    mkdir -p "$REPO/builds/rk3326"
+    GODHAND_HEADLESS=1 PS2X_BENCH=1 PS2X_GS_NULL=1 GODHAND_DUMP_ON_TIME_LIMIT=0 GODHAND_ISO_PREFETCH=0 \
+        PS2X_PAD_SCRIPT="1300v:start:10,1500v:circle:10,1700v:circle:10" \
+        PS2X_BENCH_SAVE_STATE="$REPO/builds/rk3326/stage1.state" PS2X_BENCH_SAVE_FIELD=4900 \
+        ./build-x64/bin/godhand --iso "$ISO" --headless --time-limit "${STATE_SECONDS:-400}" || true
+    [ -s "$REPO/builds/rk3326/stage1.state" ] || { echo "no state saved (the run ended before field 4900?)"; exit 1; }
+    echo "state: $REPO/builds/rk3326/stage1.state"
+    ;;
 build)
     [ -f generated/register_functions.cpp ] || { echo "no generated code: run 'build_rk3326.sh generate <iso>' first"; exit 1; }
     python3 -m ziglang version >/dev/null 2>&1 || python3 -m pip install --user ziglang==0.17.1
@@ -74,5 +89,5 @@ build)
     echo "binary: $REPO/builds/rk3326/godhand"
     ;;
 *)
-    echo "usage: build_rk3326.sh generate <iso> | vu1 <iso> | build"; exit 1;;
+    echo "usage: build_rk3326.sh generate <iso> | vu1 <iso> | state <iso> | build"; exit 1;;
 esac

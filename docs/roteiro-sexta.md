@@ -19,6 +19,7 @@ sudo apt install -y cmake ninja-build g++ python3-pip git curl binutils-aarch64-
 ./scripts/setup_base.sh
 ./scripts/build_rk3326.sh generate "/mnt/c/caminho/God Hand (USA).iso"
 ./scripts/build_rk3326.sh vu1 "/mnt/c/caminho/God Hand (USA).iso"   # VU1 pré-compilado: essencial para a velocidade
+./scripts/build_rk3326.sh state "/mnt/c/caminho/God Hand (USA).iso" # save state na primeira luta da fase 1
 ./scripts/build_rk3326.sh build
 ```
 
@@ -28,8 +29,10 @@ Copie `builds/rk3326/` para o cartão SD do R36S.
 
 ```sh
 sh collect_hw_info.sh > hw.txt
-sh run_bench.sh "/roms/ps2/God Hand (USA).iso" cpu 600
-PS2X_IOP_SPIN_US=200 sh run_bench.sh "/roms/ps2/God Hand (USA).iso" cpu 600   # IOP girando menos: menos calor?
+sh run_bench.sh "/roms/ps2/God Hand (USA).iso" cpu 300 stage1.state   # a luta: o teste que decide
+sh run_bench.sh "/roms/ps2/God Hand (USA).iso" cpu 600                # abertura + começo da fase, sem save
+PS2X_IOP_SPIN_US=200 sh run_bench.sh "/roms/ps2/God Hand (USA).iso" cpu 300 stage1.state   # IOP girando menos: menos calor?
+PS2X_MTVU=1 sh run_bench.sh "/roms/ps2/God Hand (USA).iso" cpu 300 stage1.state   # VU1 em outra thread
 sh run_bench.sh "/roms/ps2/God Hand (USA).iso" swgs 600
 ```
 

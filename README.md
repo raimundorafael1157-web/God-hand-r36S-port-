@@ -19,7 +19,10 @@ estática do [God Hand Recompiled](https://github.com/LasVola/godhand-recomp).
 | Binário ARM64 iniciando no emulador (qemu) | Feito |
 | Modo de medição sem tela (`PS2X_BENCH=1`) e GS nulo (`PS2X_GS_NULL=1`) | Feito, testado com jogo simulado |
 | Código do jogo gerado a partir de um disco verificado | Feito (10.602 arquivos + 81 módulos) |
-| Jogo completo rodando no Linux x86_64 | Em andamento |
+| Jogo completo rodando no Linux x86_64 | Feito: título, menu, abertura e luta da fase 1 ([resultados](docs/resultados-pc.md)) |
+| Jogo rodando no ARM64 (emulador qemu) | Feito: mesma sequência até a luta, sem erros |
+| Save states entre PC e ARM64 | Feito, nos dois sentidos |
+| VU1 pré-compilado | Feito: abertura de 10–23% para 93–100% de velocidade no PC |
 | Medição no R36S | Pendente: precisa do aparelho |
 | Renderizador para a Mali-G31 | Só se a medição der go |
 
@@ -45,9 +48,10 @@ tests/      teste do módulo de medição
 | --- | --- |
 | `0001-linux-build` | Correções para compilar no Linux com GCC e Clang |
 | `0002-arm64-drm` | raylib direto em KMS/DRM, sem X11 |
-| `0003-bench-mode` | Medição sem janela: velocidade, FPS do jogo, CPU por thread, memória, clock e temperatura |
+| `0003-bench-mode` | Medição sem janela: velocidade, FPS do jogo, CPU por thread, memória, clock e temperatura; save states por tempo ou campo |
 | `0004-r36s-resolution` | Resolução interna fixa em 1x (512x448), abaixo da tela 640x480 do R36S |
 | `0005-game-frame-counter` | Conta os quadros do jogo pela função que monta a cópia de tela (o God Hand não troca o buffer de exibição) |
+| `0006-iop-spin` | Espera do IOP com a instrução `yield` no ARM e tempo ajustável (`PS2X_IOP_SPIN_US`) |
 
 ## Compilar
 
@@ -56,6 +60,8 @@ Num Linux x86_64 (ou WSL no Windows), com `cmake`, `ninja`, `g++`, `python3` e `
 ```sh
 ./scripts/setup_base.sh                                   # baixa a base e aplica os patches
 ./scripts/build_rk3326.sh generate "/caminho/God Hand (USA).iso"   # gera o código a partir do SEU disco
+./scripts/build_rk3326.sh vu1 "/caminho/God Hand (USA).iso"        # pré-compila o VU1 (roda o jogo no PC)
+./scripts/build_rk3326.sh state "/caminho/God Hand (USA).iso"      # save state na primeira luta
 ./scripts/build_rk3326.sh build                           # binário ARM64 em builds/rk3326/
 ```
 
@@ -68,7 +74,7 @@ Copie `builds/rk3326/` para o cartão SD e, num terminal do aparelho:
 
 ```sh
 sh collect_hw_info.sh > hw.txt                        # dados do hardware
-sh run_bench.sh "/roms/ps2/God Hand (USA).iso" cpu 600   # 10 minutos, só a lógica do jogo: abertura e começo da fase 1
+sh run_bench.sh "/roms/ps2/God Hand (USA).iso" cpu 300 stage1.state   # a luta, só a lógica do jogo
 ```
 
 O resultado sai numa linha `[bench-summary]` e num arquivo `bench-*.log`. O que cada número quer dizer está em
