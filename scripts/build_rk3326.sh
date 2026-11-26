@@ -8,6 +8,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 SRC="$REPO/source/godhand-recomp"
 JOBS=${JOBS:-$(nproc)}
 [ -d "$SRC" ] || { echo "run scripts/setup_base.sh first"; exit 1; }
+CALLER_DIR=$(pwd)
 cd "$SRC"
 
 case "${1:-build}" in
@@ -17,8 +18,13 @@ generate)
         -DCMAKE_C_FLAGS=-msse4.1 -DCMAKE_CXX_FLAGS=-msse4.1
     ninja -C build-host ps2_recomp
     export GODHAND_RECOMP="$SRC/build-host/runtime/ps2xRecomp/ps2_recomp"
+    case "$ISO" in /*) ;; *) ISO="$CALLER_DIR/$ISO";; esac
     python3 -I build.py generate --iso "$ISO"
-    python3 -I tools/snr2/snr2.py extract --iso "$ISO"
+    # --iso goes before the subcommand (the base README has it after, which argparse rejects).
+    python3 -I tools/snr2/snr2.py --iso "$ISO" extract
+    # gen_modules.py calls snr2 without --iso: it reads the default ../disc/God Hand (USA).iso.
+    mkdir -p "$REPO/source/disc"
+    ln -sf "$ISO" "$REPO/source/disc/God Hand (USA).iso"
     python3 -I tools/snr2/gen_modules.py
     python3 -I build.py modules
     ;;
