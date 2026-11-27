@@ -5,6 +5,7 @@
 #include <GLES3/gl3.h>
 #include <gbm.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <unistd.h>
@@ -40,8 +41,17 @@ namespace gles
         }
         if (dpy == EGL_NO_DISPLAY)
         {
-            for (const char *node : {"/dev/dri/renderD128", "/dev/dri/card0", "/dev/dri/card1"})
+            // Never renderD128 by default: on the RK3326 it is rockchip-drm's display-only render node, and
+            // eglInitialize with EGL_PLATFORM_GBM_KHR on it NULL-dereferences in the 4.4 kernel (Oops 96000005) and hangs
+            // the device until a hard power-off (found by the Celosia R36S port, docs/r36s_port.md). SDL2 KMSDRM and
+            // raylib DRM use the card nodes, which is what this tries. GLES_EGL_NODE=<path> forces one node.
+            const char *forced = std::getenv("GLES_EGL_NODE");
+            const bool useForced = forced && *forced;
+            const char *nodes[2] = {useForced ? forced : "/dev/dri/card0", useForced ? nullptr : "/dev/dri/card1"};
+            for (const char *node : nodes)
             {
+                if (!node)
+                    continue;
                 drmFd = open(node, O_RDWR | O_CLOEXEC);
                 if (drmFd < 0)
                     continue;
