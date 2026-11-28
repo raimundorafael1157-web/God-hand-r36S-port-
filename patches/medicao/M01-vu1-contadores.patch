@@ -1,0 +1,137 @@
+--- a/runtime/ps2xRuntime/include/ps2_prof.h
++++ b/runtime/ps2xRuntime/include/ps2_prof.h
+@@ -382,3 +382,21 @@
+         }
+     }
+ }
++
++// VU1 counters for the bench (PS2X_BENCH=1 PS2X_PROF=1 only): how often the VU1 runs, how many VU cycles it executes,
++// and how much of that goes through the pre-compiled blocks versus the interpreter, with the host time of each. Read
++// by ps2_bench.h at the end ([bench-vu1]). Measurement only: nothing here changes what the VU1 computes.
++namespace ps2x_prof
++{
++    struct VuStats
++    {
++        std::atomic<uint64_t> runs{0u}, noCompiled{0u}, compiledCalls{0u}, fallbacks{0u}, interpPairs{0u};
++        std::atomic<uint64_t> cyclesCompiled{0u}, cyclesInterp{0u}, ticksCompiled{0u}, ticksInterp{0u}, csrChanges{0u};
++    };
++    inline VuStats g_vu1;
++    inline bool vuStatsOn()
++    {
++        static const bool on = enabledByEnvironment();
++        return on;
++    }
++}
+--- a/runtime/ps2xRuntime/src/lib/ps2_bench.h
++++ b/runtime/ps2xRuntime/src/lib/ps2_bench.h
+@@ -469,6 +469,20 @@
+         applyPinning(threadsStart, pinned);
+         uint64_t sectionStart[ps2x_prof::Count] = {}, switchesStart = 0;
+         double sectionSum[ps2x_prof::Count] = {};
++        // [bench-vu1]: VU1 counters summed over the measured seconds, and the counter rate (ticks per second).
++        constexpr int kVuStats = 10;
++        const auto readVu = [](uint64_t out[kVuStats]) {
++            const auto &v = ps2x_prof::g_vu1;
++            const std::atomic<uint64_t> *src[kVuStats] = {&v.runs, &v.noCompiled, &v.compiledCalls, &v.fallbacks, &v.interpPairs,
++                                                          &v.cyclesCompiled, &v.cyclesInterp, &v.ticksCompiled, &v.ticksInterp, &v.csrChanges};
++            for (int i = 0; i < kVuStats; ++i)
++                out[i] = src[i]->load(std::memory_order_relaxed);
++        };
++        uint64_t vuStart[kVuStats] = {}, vuNow[kVuStats] = {};
++        double vuSum[kVuStats] = {}, vuFields = 0.0;
++        readVu(vuStart);
++        const uint64_t tickRef0 = ps2x_prof::ticks();
++        const auto clockRef0 = std::chrono::steady_clock::now();
+         ps2x_prof::snapshot(sectionStart, switchesStart);
+         ps2x_prof::SampledSnapshot sampledStart = ps2x_prof::sampledSnapshot();
+         const double intervalBias = ps2x_prof::emptyIntervalTicks();
+@@ -601,6 +615,10 @@
+                 cpuSum += cpu;
+                 for (int i = 0; i < ps2x_prof::Count; ++i)
+                     sectionSum[i] += sectionShare[i];
++                readVu(vuNow);
++                for (int i = 0; i < kVuStats; ++i)
++                    vuSum[i] += static_cast<double>(vuNow[i] - vuStart[i]);
++                vuFields += static_cast<double>(field - startField);
+                 switchesSum += switchRate;
+                 sampledCallsSum += static_cast<double>(sampledCalls) / seconds;
+                 speeds.push_back(100.0 * fieldRate / 59.94);
+@@ -610,6 +628,7 @@
+             }
+             for (int i = 0; i < ps2x_prof::Count; ++i)
+                 sectionStart[i] = sectionNow[i];
++            readVu(vuStart);
+             switchesStart = switchesNow;
+             sampledStart = sampledNow;
+             windowStart = now;
+@@ -666,6 +685,19 @@
+             std::fprintf(stderr, "[bench-sections] GameThread wall time:%s | switches/s=%.0f x %.1f ns + sampled markers/s=%.0f x %.1f ns -> overhead ~%.2f%% of the GameThread | counter read bias %.2f ticks\n",
+                          sectionText.c_str(), switchesPerSecond, costNs, sampledPerSecond, sampledNs, overhead, intervalBias);
+         }
++        if (ps2x_prof::vuStatsOn() && vuFields > 0.0 && vuSum[0] > 0.0)
++        {
++            const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - clockRef0).count();
++            const double tickRate = secs > 0.0 ? static_cast<double>(ps2x_prof::ticks() - tickRef0) / secs : 0.0;
++            const auto perField = [&](int i) { return vuSum[i] / vuFields; };
++            const auto ms = [&](int i) { return tickRate > 0.0 ? 1000.0 * vuSum[i] / tickRate / vuFields : 0.0; };
++            const auto nsPerCycle = [&](int t, int c) { return vuSum[c] > 0.0 && tickRate > 0.0 ? 1e9 * vuSum[t] / tickRate / vuSum[c] : 0.0; };
++            const double cycles = vuSum[5] + vuSum[6];
++            std::fprintf(stderr, "[bench-vu1] per field: runs=%.1f (no compiled program %.1f, rounding-mode switches %.1f) | VU cycles=%.0f, compiled %.1f%% | "
++                                 "compiled: calls=%.1f fallbacks=%.1f time=%.2fms %.1f ns/VU cycle | interpreter: pairs=%.0f time=%.2fms %.1f ns/VU cycle\n",
++                         perField(0), perField(1), perField(9), cycles / vuFields, cycles > 0.0 ? 100.0 * vuSum[5] / cycles : 0.0,
++                         perField(2), perField(3), ms(7), nsPerCycle(7, 5), perField(4), ms(8), nsPerCycle(8, 6));
++        }
+         // Long runs: does the speed hold once the device is hot?
+         const size_t m = std::min<size_t>(60u, speeds.size() / 2u);
+         if (m > 0u)
+--- a/runtime/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/runtime/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -1417,6 +1417,16 @@
+     if (changeRounding)
+         _mm_setcsr(previousCsr | 0x6000u);
+     const uint64_t budgetEnd = vu.m_cycle + maxCycles;
++    // RK3326 port (bench, PS2X_PROF=1): VU1 runs, cycles and host time, compiled blocks vs interpreter ([bench-vu1]).
++    const bool vuStats = vu.m_unit == VU1Interpreter::Unit::VU1 && ps2x_prof::vuStatsOn();
++    if (vuStats)
++    {
++        ps2x_prof::bump(ps2x_prof::g_vu1.runs, 1u);
++        if (!compiled)
++            ps2x_prof::bump(ps2x_prof::g_vu1.noCompiled, 1u);
++        if (changeRounding)
++            ps2x_prof::bump(ps2x_prof::g_vu1.csrChanges, 1u);
++    }
+     bool programEnded = false;
+     const Vu1RunArgs compiledArgs{vuData, dataSize, &gs, memory, codeSize, budgetEnd};
+     bool interpretNextPair = false;
+@@ -1424,7 +1434,16 @@
+     {
+         if (compiled && !interpretNextPair)
+         {
++            const uint64_t c0 = vuStats ? vu.m_cycle : 0u, t0 = vuStats ? ps2x_prof::ticks() : 0u;
+             const StepResult result = compiled(vu, compiledArgs);
++            if (vuStats)
++            {
++                ps2x_prof::bump(ps2x_prof::g_vu1.ticksCompiled, ps2x_prof::ticks() - t0);
++                ps2x_prof::bump(ps2x_prof::g_vu1.cyclesCompiled, vu.m_cycle - c0);
++                ps2x_prof::bump(ps2x_prof::g_vu1.compiledCalls, 1u);
++                if (result != StepResult::Budget && result != StepResult::Ended)
++                    ps2x_prof::bump(ps2x_prof::g_vu1.fallbacks, 1u);
++            }
+             if (result == StepResult::Budget)
+                 break;
+             if (result == StepResult::Ended)
+@@ -1455,7 +1474,14 @@
+             break;
+         }
+ 
++        const uint64_t ic0 = vuStats ? vu.m_cycle : 0u, it0 = vuStats ? ps2x_prof::ticks() : 0u;
+         const StepResult step = stepPair(vu, decoded, vuData, dataSize, gs, memory, codeSize, budgetEnd);
++        if (vuStats)
++        {
++            ps2x_prof::bump(ps2x_prof::g_vu1.ticksInterp, ps2x_prof::ticks() - it0);
++            ps2x_prof::bump(ps2x_prof::g_vu1.cyclesInterp, vu.m_cycle - ic0);
++            ps2x_prof::bump(ps2x_prof::g_vu1.interpPairs, 1u);
++        }
+         if (step == StepResult::Budget)
+             break;
+         if (step == StepResult::Ended)
