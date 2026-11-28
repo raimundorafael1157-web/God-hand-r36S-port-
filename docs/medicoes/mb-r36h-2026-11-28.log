@@ -1,0 +1,67 @@
+== vu1_microbench 20211106-103808
+569a2afc2639e7f0519846c861d791f2c46da825a736b030f2d3da31e3fdad9b  /roms/ports/godhand-teste/vu1_microbench
+Linux rg351mp 4.4.189 #3 SMP Wed Oct 13 23:24:26 EDT 2021 aarch64 aarch64 aarch64 GNU/Linux
+Game Console R35S/R36S fix by lxc
+Features	: fp asimd evtstrm aes pmull sha1 sha2 crc32
+CPU part	: 0xd04
+CPU revision	: 2
+Features	: fp asimd evtstrm aes pmull sha1 sha2 crc32
+perf_event_paranoid=1 uid=0
+/sys/devices/system/cpu/cpu0 performance 1512000 max=1512000
+/sys/devices/system/cpu/cpu1 performance 1512000 max=1512000
+/sys/devices/system/cpu/cpu2 performance 1512000 max=1512000
+/sys/devices/system/cpu/cpu3 performance 1512000 max=1512000
+loadavg: 0.64 0.15 0.05 2/143 962
+temperature before: 48 C
+governors during the run: performance 1512000 kHz
+== pass on cpu 3, temperature 47 C
+[mb-env] arch=aarch64 (sse2neon) compiler=Clang 22.1.8 cpu=3 mhz=1512 governor=performance perf=yes reps=9 target=300ms model=Game Console R35S/R36S fix by lxc
+[mb] loop            ns/op=   0.387 (min 0.386 max 0.387, spread 0.0%) cycles/op=   0.50 instr/op=  0.50 ipc=1.00 ops=776112248 | empty loop step (harness floor)
+[mb] budget          ns/op=   3.493 (min 3.468 max 3.536, spread 1.9%) cycles/op=   4.52 instr/op=  3.38 ipc=0.75 ops=85697824 | budget check + ++cyc
+[mb] rmax2           ns/op=  11.113 (min 11.112 max 11.118, spread 0.0%) cycles/op=  14.38 instr/op= 14.38 ipc=1.00 ops=26993792 | budget + 2 rmax (VI ready) + ready write
+[mb] rmax_vf         ns/op=  10.824 (min 10.823 max 10.828, spread 0.0%) cycles/op=  14.00 instr/op= 14.00 ipc=1.00 ops=27697360 | budget + 8 rmax (VF 4-lane ready) + setReady4
+[mb] instr_vi        ns/op=  11.035 (min 11.027 max 11.049, spread 0.2%) cycles/op=  14.27 instr/op= 14.25 ipc=1.00 ops=27205336 | integer lower instruction (budget, rmax, VI write, branch backup)
+[mb] vnorm_thr       ns/op=  14.594 (min 14.591 max 14.599, spread 0.1%) cycles/op=  18.88 instr/op=  9.00 ipc=0.48 ops=20563696 | vnorm, independent, memory to memory
+[mb] vnorm_lat       ns/op=   9.471 (min 9.469 max 9.474, spread 0.1%) cycles/op=  12.25 instr/op=  6.38 ipc=0.52 ops=31687840 | vnorm, dependent chain
+[mb] writevf         ns/op=   7.634 (min 7.633 max 7.637, spread 0.1%) cycles/op=   9.88 instr/op=  5.88 ipc=0.59 ops=39299760 | writeVf with dest blend (raw + norm stores)
+[mb] ldst            ns/op=  11.790 (min 11.787 max 11.793, spread 0.0%) cycles/op=  15.25 instr/op=  8.88 ipc=0.58 ops=25450880 | LQ/SQ: qaddr + ldq + storeDest
+[mb] movemask_thr    ns/op=  10.147 (min 10.146 max 10.151, spread 0.1%) cycles/op=  13.13 instr/op=  7.63 ipc=0.58 ops=29569064 | movemask_ps + kRev4, independent
+[mb] movemask_lat    ns/op=  16.428 (min 16.427 max 16.435, spread 0.1%) cycles/op=  21.25 instr/op=  8.38 ipc=0.39 ops=18259600 | movemask_ps -> table -> vector, dependent
+[mb] muladd_thr      ns/op=   3.286 (min 3.285 max 3.287, spread 0.0%) cycles/op=   4.25 instr/op=  2.38 ipc=0.56 ops=91295272 | mul_ps + add_ps, 8 independent chains
+[mb] muladd_lat      ns/op=   6.185 (min 6.184 max 6.186, spread 0.0%) cycles/op=   8.00 instr/op=  2.38 ipc=0.30 ops=48517784 | mul_ps + add_ps, dependent chain
+[mb] fmaccore        ns/op=  36.820 (min 36.816 max 36.832, spread 0.0%) cycles/op=  47.63 instr/op= 24.63 ipc=0.52 ops=8148416 | fmacCore<Madd>: math + safety checks + 1 movemask
+[mb] fmac_fast       ns/op= 133.289 (min 133.265 max 133.341, spread 0.1%) cycles/op= 172.39 instr/op=114.75 ipc=0.67 ops=2251688 | MADD fast path + flags + ring push + writeVf
+[mb] fmac_exact      ns/op= 237.380 (min 237.336 max 237.449, spread 0.0%) cycles/op= 307.02 instr/op=230.37 ipc=0.75 ops=1264392 | MADD exact (double) path + flags + ring push + writeVf
+[mb] pd_core         ns/op=  22.130 (min 22.128 max 22.143, spread 0.1%) cycles/op=  28.63 instr/op= 18.88 ipc=0.66 ops=13560296 | double math only: 4 cvtps_pd + 2 mul_pd + 2 cmp + movemask_pd
+[mb] instr_fmac      ns/op= 156.479 (min 156.443 max 156.557, spread 0.1%) cycles/op= 202.39 instr/op=135.50 ipc=0.67 ops=1916224 | full FMAC instruction: budget + VF ready stall + fast MADD + writeVf + setReady4
+[mb] instr_fmac_x10  ns/op= 174.055 (min 174.042 max 174.123, spread 0.0%) cycles/op= 225.12 instr/op=152.91 ipc=0.68 ops=1723408 | the same, 1 in 10 through the exact path
+[mb] instr_fmac_x2   ns/op= 216.811 (min 216.791 max 216.866, spread 0.0%) cycles/op= 280.42 instr/op=199.12 ipc=0.71 ops=1383816 | the same, 1 in 2 through the exact path
+[mb] csr             ns/op=  44.071 (min 44.066 max 44.079, spread 0.0%) cycles/op=  57.00 instr/op= 49.38 ipc=0.87 ops=6808600 | getcsr + setcsr(RZ) + getcsr + setcsr(restore)
+[mb-end] sink=343625865860972077
+exit code 0
+== pass on cpu 2, temperature 54 C
+[mb-env] arch=aarch64 (sse2neon) compiler=Clang 22.1.8 cpu=2 mhz=1512 governor=performance perf=yes reps=9 target=300ms model=Game Console R35S/R36S fix by lxc
+[mb] loop            ns/op=   0.393 (min 0.391 max 0.393, spread 0.5%) cycles/op=   0.50 instr/op=  0.50 ipc=1.00 ops=775369040 | empty loop step (harness floor)
+[mb] budget          ns/op=   3.561 (min 3.507 max 3.635, spread 3.6%) cycles/op=   4.53 instr/op=  3.38 ipc=0.74 ops=84364992 | budget check + ++cyc
+[mb] rmax2           ns/op=  11.300 (min 11.299 max 11.308, spread 0.1%) cycles/op=  14.38 instr/op= 14.38 ipc=1.00 ops=26632184 | budget + 2 rmax (VI ready) + ready write
+[mb] rmax_vf         ns/op=  11.009 (min 11.003 max 11.014, spread 0.1%) cycles/op=  14.00 instr/op= 14.00 ipc=1.00 ops=27360576 | budget + 8 rmax (VF 4-lane ready) + setReady4
+[mb] instr_vi        ns/op=  11.269 (min 11.239 max 11.285, spread 0.4%) cycles/op=  14.33 instr/op= 14.25 ipc=0.99 ops=26539088 | integer lower instruction (budget, rmax, VI write, branch backup)
+[mb] vnorm_thr       ns/op=  14.839 (min 14.834 max 14.845, spread 0.1%) cycles/op=  18.88 instr/op=  9.00 ipc=0.48 ops=20294864 | vnorm, independent, memory to memory
+[mb] vnorm_lat       ns/op=   9.628 (min 9.626 max 9.635, spread 0.1%) cycles/op=  12.25 instr/op=  6.38 ipc=0.52 ops=31277872 | vnorm, dependent chain
+[mb] writevf         ns/op=   7.762 (min 7.761 max 7.767, spread 0.1%) cycles/op=   9.88 instr/op=  5.88 ipc=0.59 ops=38759456 | writeVf with dest blend (raw + norm stores)
+[mb] ldst            ns/op=  11.987 (min 11.985 max 11.996, spread 0.1%) cycles/op=  15.25 instr/op=  8.88 ipc=0.58 ops=25088592 | LQ/SQ: qaddr + ldq + storeDest
+[mb] movemask_thr    ns/op=  10.316 (min 10.315 max 10.323, spread 0.1%) cycles/op=  13.13 instr/op=  7.63 ipc=0.58 ops=29144432 | movemask_ps + kRev4, independent
+[mb] movemask_lat    ns/op=  16.703 (min 16.701 max 16.718, spread 0.1%) cycles/op=  21.25 instr/op=  8.38 ipc=0.39 ops=18016272 | movemask_ps -> table -> vector, dependent
+[mb] muladd_thr      ns/op=   3.341 (min 3.340 max 3.344, spread 0.1%) cycles/op=   4.25 instr/op=  2.38 ipc=0.56 ops=90094728 | mul_ps + add_ps, 8 independent chains
+[mb] muladd_lat      ns/op=   6.288 (min 6.286 max 6.295, spread 0.1%) cycles/op=   8.00 instr/op=  2.38 ipc=0.30 ops=47930904 | mul_ps + add_ps, dependent chain
+[mb] fmaccore        ns/op=  37.442 (min 37.426 max 37.458, spread 0.1%) cycles/op=  47.63 instr/op= 24.63 ipc=0.52 ops=8039936 | fmacCore<Madd>: math + safety checks + 1 movemask
+[mb] fmac_fast       ns/op= 135.574 (min 135.530 max 135.694, spread 0.1%) cycles/op= 172.43 instr/op=114.75 ipc=0.67 ops=2222600 | MADD fast path + flags + ring push + writeVf
+[mb] fmac_exact      ns/op= 241.453 (min 241.395 max 241.604, spread 0.1%) cycles/op= 307.11 instr/op=230.37 ipc=0.75 ops=1247432 | MADD exact (double) path + flags + ring push + writeVf
+[mb] pd_core         ns/op=  22.500 (min 22.497 max 22.513, spread 0.1%) cycles/op=  28.63 instr/op= 18.88 ipc=0.66 ops=13376016 | double math only: 4 cvtps_pd + 2 mul_pd + 2 cmp + movemask_pd
+[mb] instr_fmac      ns/op= 159.175 (min 159.147 max 159.274, spread 0.1%) cycles/op= 202.45 instr/op=135.50 ipc=0.67 ops=1891016 | full FMAC instruction: budget + VF ready stall + fast MADD + writeVf + setReady4
+[mb] instr_fmac_x10  ns/op= 177.090 (min 177.064 max 177.305, spread 0.1%) cycles/op= 225.21 instr/op=152.91 ipc=0.68 ops=1699352 | the same, 1 in 10 through the exact path
+[mb] instr_fmac_x2   ns/op= 220.575 (min 220.525 max 220.684, spread 0.1%) cycles/op= 280.50 instr/op=199.12 ipc=0.71 ops=1365328 | the same, 1 in 2 through the exact path
+[mb] csr             ns/op=  44.804 (min 44.801 max 44.855, spread 0.1%) cycles/op=  57.01 instr/op= 49.38 ipc=0.87 ops=6715856 | getcsr + setcsr(RZ) + getcsr + setcsr(restore)
+[mb-end] sink=342977262102900349
+exit code 0
+temperature after: 55 C
