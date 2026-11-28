@@ -1,0 +1,10 @@
+Linhas de medição de cada execução (M: contagens e GIF; B: só [bench-vu1] não existe, é o binário do pacote)
+== bench-cpu-B1-20261128-020139.log
+[bench-summary] seconds=15 speed avg=96% p5=83% | fields/s avg=57.8 | frames/s avg=28.9 p5=25.0 | flips/s avg=0.0 p5=0.0 | disp/s avg=0.0 | worst gap p95=47ms max=48ms | cpu avg=156% | rss max=143MB
+[bench-sections] GameThread wall time: ee=29.0% vu1=33.2% vu0=0.0% iop=1.0% dispatch=11.2% sched=3.1% gif=7.8% vif=3.0% idle=11.8% gs-wait=0.0% vu-wait=0.0% | switches/s=1295039 x 17.0 ns + sampled markers/s=9474675 x 4.5 ns -> overhead ~6.51% of the GameThread | counter read bias 27.77 ticks
+== bench-cpu-M1-20261128-020220.log
+[bench-summary] seconds=15 speed avg=95% p5=90% | fields/s avg=57.1 | frames/s avg=28.6 p5=27.0 | flips/s avg=0.0 p5=0.0 | disp/s avg=0.0 | worst gap p95=53ms max=54ms | cpu avg=156% | rss max=133MB
+[bench-sections] GameThread wall time: ee=25.3% vu1=49.4% vu0=0.0% iop=0.9% dispatch=8.3% sched=2.5% gif=10.3% vif=3.0% idle=0.4% gs-wait=0.0% vu-wait=0.0% | switches/s=1278783 x 15.4 ns + sampled markers/s=9372849 x 2.9 ns -> overhead ~4.73% of the GameThread | counter read bias 27.57 ticks
+[bench-vu1] per field: runs=920.5 (no compiled program 0.0, rounding-mode switches 0.0) | VU cycles=1427442, compiled 100.0% | compiled: calls=920.5 fallbacks=0.0 time=9.98ms 7.0 ns/VU cycle | interpreter: pairs=0 time=0.00ms 0.0 ns/VU cycle
+[bench-vu1-paths] per field: FMAC=812243 (ring fmac 224953 | fmacV 546353 | fmacF direct 40936 | fastN 0 | fastV 0 | fast->V fallback 0) exact(double)=5348 (0.66% of FMAC) | flag records pushed=265890 clip pushed=52572 | reads(commitStatus)=22625 folded at reads=255234 at overflow=10655 pending at run end=5356 | writeVf=447 ldq=375086 stq=168206 div=26759 clip=52572 xgkick=1117
+[bench-gif] per field: packets=1984 bytes=2211558 tags packed=1847 reglist=56 image=329 regs=4357 kicks=25400 | time 1.74ms: parse=0.94ms(54.2%,0 calls) lock=0.06ms(3.3%,1984 calls) submit=0.65ms(37.6%,6917 calls) flush=0.03ms(2.0%,1984 calls) sync=0.00ms(0.0%,0 calls) upload=0.00ms(0.0%,0 calls) other=0.05ms(2.9%,597 calls)

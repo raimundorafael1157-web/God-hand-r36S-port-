@@ -1,0 +1,16 @@
+Teste A/B: A = godhand-A (0001-0009), B = godhand-B (0001-0010) | 20261128-020300 | 
+
+exec pac speed%   fps   fields  Game_ms    GS_ms   IOP_ms   vu1% vuwait% gswait%    ee%  idle% MHz_min/med/max tC_min/med/max   thr   rssMB worstms erros
+B1   B       96  28.9      867    15.31     2.89     8.64   33.2     0.0     0.0   29.0   11.8    0/   0/   0   0/  0/  0     0     143     48     0
+M1   M       95  28.6      857    17.41     2.61     6.99   49.4     0.0     0.0   25.3    0.4    0/   0/   0   0/  0/  0     0     133     54     0
+
+Média por pacote (as estatísticas completas - mediana, desvio, melhor/pior, diferença % - saem do
+tools/ab_report.py no PC, a partir dos mesmos logs):
+         speed%   fps   fields  Game_ms    GS_ms   IOP_ms   vu1% vuwait% gswait%    ee%  idle%
+média B   96.00   28.90  867.00   15.31    2.89    8.64   33.20    0.00    0.00   29.00   11.80   (1 execuções de 300 s)
+
+Colunas: speed% velocidade de emulação (100% = PS2) | fps quadros do jogo por segundo | fields emulados no
+período medido | Game/GS/IOP_ms tempo OCUPADO de CPU por field emulado | vu1% vuwait% gswait% ee% idle%: % do
+tempo de PAREDE da GameThread (vuwait só com PS2X_MTVU=1) | MHz cpu0 mín/méd/máx | tC zona mais quente
+mín/méd/máx | thr segundos com throttling (clock abaixo do teto ou teto caindo) | rssMB memória máx |
+worstms pior intervalo entre quadros | erros linhas de erro no log. A5/B5 (900 s) ficam fora da média.

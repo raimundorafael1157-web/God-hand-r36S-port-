@@ -1,0 +1,619 @@
+--- a/runtime/ps2xRuntime/include/ps2_prof.h
++++ b/runtime/ps2xRuntime/include/ps2_prof.h
+@@ -400,3 +400,105 @@
+         return on;
+     }
+ }
++
++// Measurement build only (patches/medicao M02/M03, never in packages A or B): counts of the VU1 code paths and the
++// flag records, and the GIF breakdown. Written by the thread that runs the code (GameThread with PS2X_MTVU=0),
++// read by the bench thread once per second. Plain load + store (bump): no atomic read-modify-write in the hot paths.
++namespace ps2x_prof
++{
++    struct VuPathStats
++    {
++        // FMAC variants as the generated code calls them (see ps2_vu1_impl.inl).
++        std::atomic<uint64_t> fmacRing{0u};     // fmac<>: flags computed and pushed to the ring every op
++        std::atomic<uint64_t> fmacV{0u};        // fmacV<>: sticky flags accumulated in vectors
++        std::atomic<uint64_t> fmacF{0u};        // fmacF<>: flags computed, pushed by pushFmacFlags (segment's last FMAC)
++        std::atomic<uint64_t> fmacFastN{0u};    // fmacFastN<>: no flags (dead-flag analysis)
++        std::atomic<uint64_t> fmacFastV{0u};    // fmacFastV<>: sticky only
++        std::atomic<uint64_t> fastFallback{0u}; // fmacFast* that fell back to fmacV (saturating product)
++        std::atomic<uint64_t> fmacExact{0u};    // fmacExact (double precision), from any variant
++        // Flag records.
++        std::atomic<uint64_t> flagPush{0u}, clipPush{0u};
++        std::atomic<uint64_t> readEvents{0u};       // commitStatus: points where the program reads MAC/status
++        std::atomic<uint64_t> foldedAtRead{0u};     // records folded at those points
++        std::atomic<uint64_t> foldedAtOverflow{0u}; // records folded because the ring (32) was full
++        std::atomic<uint64_t> pendingAtEnd{0u};     // records still in the ring when a run returns (committed then)
++        // Other instruction kinds (helper calls).
++        std::atomic<uint64_t> writeVf{0u}, ldq{0u}, stq{0u}, divOp{0u}, clipOp{0u}, xgkick{0u};
++    };
++    inline VuPathStats g_vuPaths;
++    inline bool measOn()
++    {
++        static const bool on = enabledByEnvironment();
++        return on;
++    }
++#define PS2X_MEAS_BUMP(field) do { if (::ps2x_prof::measOn()) ::ps2x_prof::bump(::ps2x_prof::g_vuPaths.field, 1u); } while (0)
++#define PS2X_MEAS_ADD(field, n) do { if (::ps2x_prof::measOn()) ::ps2x_prof::bump(::ps2x_prof::g_vuPaths.field, (n)); } while (0)
++
++    // GIF: time inside GS::processGIFPacket split by what it does (exclusive), plus counts.
++    enum GifCat : uint8_t
++    {
++        GifParse = 0,  // tags, register decode, primitive assembly (everything not below)
++        GifLock,       // waiting for the GS state mutex
++        GifSubmit,     // handing primitive batches to the GS backend (GS thread queue; includes gs-wait when full)
++        GifFlush,      // backend Flush (push the pending batch to the GS thread)
++        GifSync,       // backend Sync: wait until the GS thread has finished (FINISH, readbacks...)
++        GifUpload,     // native image upload path (host -> VRAM)
++        GifOther,      // other backend calls: RawGif, CLUT loads, transfer begin, texture flush
++        GifCatCount
++    };
++    inline const char *const kGifNames[GifCatCount] = {"parse", "lock", "submit", "flush", "sync", "upload", "other"};
++    struct GifStats
++    {
++        std::atomic<uint64_t> ticks[GifCatCount] = {};
++        std::atomic<uint64_t> calls[GifCatCount] = {};
++        std::atomic<uint64_t> packets{0u}, bytes{0u}, tagsPacked{0u}, tagsReglist{0u}, tagsImage{0u}, regWrites{0u}, kicks{0u};
++    };
++    inline GifStats g_gif;
++    struct GifThreadState
++    {
++        int depth = 0;
++        uint8_t cur = GifParse;
++        uint64_t last = 0;
++    };
++    inline thread_local GifThreadState t_gif;
++    inline void gifAccount(uint64_t now)
++    {
++        bump(g_gif.ticks[t_gif.cur], now - t_gif.last);
++        t_gif.last = now;
++    }
++    struct GifPacketScope // one per processGIFPacket (re-entrant)
++    {
++        bool on;
++        explicit GifPacketScope(uint32_t bytes) : on(measOn())
++        {
++            if (!on) return;
++            if (t_gif.depth++ == 0) { t_gif.cur = GifParse; t_gif.last = ticks(); }
++            bump(g_gif.packets, 1u);
++            bump(g_gif.bytes, bytes);
++        }
++        ~GifPacketScope()
++        {
++            if (on && --t_gif.depth == 0) gifAccount(ticks());
++        }
++    };
++    struct GifSubScope // a part of the packet's work; inactive outside processGIFPacket
++    {
++        bool on;
++        uint8_t prev = GifParse;
++        explicit GifSubScope(uint8_t cat) : on(measOn() && t_gif.depth > 0)
++        {
++            if (!on) return;
++            gifAccount(ticks());
++            prev = t_gif.cur;
++            t_gif.cur = cat;
++            bump(g_gif.calls[cat], 1u);
++        }
++        ~GifSubScope()
++        {
++            if (!on) return;
++            gifAccount(ticks());
++            t_gif.cur = prev;
++        }
++    };
++    inline bool gifInside() { return measOn() && t_gif.depth > 0; }
++}
+--- a/runtime/ps2xRuntime/src/lib/ps2_bench.h
++++ b/runtime/ps2xRuntime/src/lib/ps2_bench.h
+@@ -481,6 +481,26 @@
+         uint64_t vuStart[kVuStats] = {}, vuNow[kVuStats] = {};
+         double vuSum[kVuStats] = {}, vuFields = 0.0;
+         readVu(vuStart);
++        // Measurement build (M02/M03): VU1 paths and GIF breakdown, summed over the measured seconds like vuSum.
++        const auto readMeas = [](std::vector<uint64_t> &out) {
++            const auto &v = ps2x_prof::g_vuPaths;
++            const auto &g = ps2x_prof::g_gif;
++            const std::atomic<uint64_t> *src[] = {&v.fmacRing, &v.fmacV, &v.fmacF, &v.fmacFastN, &v.fmacFastV, &v.fastFallback, &v.fmacExact,
++                                                  &v.flagPush, &v.clipPush, &v.readEvents, &v.foldedAtRead, &v.foldedAtOverflow, &v.pendingAtEnd,
++                                                  &v.writeVf, &v.ldq, &v.stq, &v.divOp, &v.clipOp, &v.xgkick,
++                                                  &g.packets, &g.bytes, &g.tagsPacked, &g.tagsReglist, &g.tagsImage, &g.regWrites, &g.kicks};
++            out.clear();
++            for (const auto *a : src)
++                out.push_back(a->load(std::memory_order_relaxed));
++            for (int i = 0; i < ps2x_prof::GifCatCount; ++i)
++                out.push_back(g.ticks[i].load(std::memory_order_relaxed));
++            for (int i = 0; i < ps2x_prof::GifCatCount; ++i)
++                out.push_back(g.calls[i].load(std::memory_order_relaxed));
++        };
++        std::vector<uint64_t> measStart, measNow;
++        std::vector<double> measSum;
++        readMeas(measStart);
++        measSum.assign(measStart.size(), 0.0);
+         const uint64_t tickRef0 = ps2x_prof::ticks();
+         const auto clockRef0 = std::chrono::steady_clock::now();
+         ps2x_prof::snapshot(sectionStart, switchesStart);
+@@ -618,6 +638,9 @@
+                 readVu(vuNow);
+                 for (int i = 0; i < kVuStats; ++i)
+                     vuSum[i] += static_cast<double>(vuNow[i] - vuStart[i]);
++                readMeas(measNow);
++                for (size_t i = 0; i < measNow.size(); ++i)
++                    measSum[i] += static_cast<double>(measNow[i] - measStart[i]);
+                 vuFields += static_cast<double>(field - startField);
+                 switchesSum += switchRate;
+                 sampledCallsSum += static_cast<double>(sampledCalls) / seconds;
+@@ -629,6 +652,7 @@
+             for (int i = 0; i < ps2x_prof::Count; ++i)
+                 sectionStart[i] = sectionNow[i];
+             readVu(vuStart);
++            readMeas(measStart);
+             switchesStart = switchesNow;
+             sampledStart = sampledNow;
+             windowStart = now;
+@@ -698,6 +722,34 @@
+                          perField(0), perField(1), perField(9), cycles / vuFields, cycles > 0.0 ? 100.0 * vuSum[5] / cycles : 0.0,
+                          perField(2), perField(3), ms(7), nsPerCycle(7, 5), perField(4), ms(8), nsPerCycle(8, 6));
+         }
++        if (ps2x_prof::measOn() && vuFields > 0.0)
++        {
++            const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - clockRef0).count();
++            const double tickRate = secs > 0.0 ? static_cast<double>(ps2x_prof::ticks() - tickRef0) / secs : 0.0;
++            const auto f = [&](size_t i) { return measSum[i] / vuFields; };
++            const double fmacAll = f(0) + f(1) + (f(2) - f(0)) + f(3) + f(4); // fmacF counts fmac<> calls too
++            std::fprintf(stderr, "[bench-vu1-paths] per field: FMAC=%.0f (ring fmac %.0f | fmacV %.0f | fmacF direct %.0f | fastN %.0f | fastV %.0f | fast->V fallback %.0f) exact(double)=%.0f (%.2f%% of FMAC) | "
++                                 "flag records pushed=%.0f clip pushed=%.0f | reads(commitStatus)=%.0f folded at reads=%.0f at overflow=%.0f pending at run end=%.0f | "
++                                 "writeVf=%.0f ldq=%.0f stq=%.0f div=%.0f clip=%.0f xgkick=%.0f\n",
++                         fmacAll, f(0), f(1), f(2) - f(0), f(3), f(4), f(5), f(6), fmacAll > 0.0 ? 100.0 * f(6) / fmacAll : 0.0,
++                         f(7), f(8), f(9), f(10), f(11), f(12), f(13), f(14), f(15), f(16), f(17), f(18));
++            const size_t t0 = 26u, c0 = 26u + ps2x_prof::GifCatCount;
++            double gifTicks = 0.0;
++            for (int i = 0; i < ps2x_prof::GifCatCount; ++i)
++                gifTicks += measSum[t0 + i];
++            std::string parts;
++            for (int i = 0; i < ps2x_prof::GifCatCount; ++i)
++            {
++                char part[96];
++                std::snprintf(part, sizeof(part), " %s=%.2fms(%.1f%%,%.0f calls)", ps2x_prof::kGifNames[i],
++                              tickRate > 0.0 ? 1000.0 * measSum[t0 + i] / tickRate / vuFields : 0.0,
++                              gifTicks > 0.0 ? 100.0 * measSum[t0 + i] / gifTicks : 0.0, measSum[c0 + i] / vuFields);
++                parts += part;
++            }
++            std::fprintf(stderr, "[bench-gif] per field: packets=%.0f bytes=%.0f tags packed=%.0f reglist=%.0f image=%.0f regs=%.0f kicks=%.0f | time %.2fms:%s\n",
++                         f(19), f(20), f(21), f(22), f(23), f(24), f(25),
++                         tickRate > 0.0 ? 1000.0 * gifTicks / tickRate / vuFields : 0.0, parts.c_str());
++        }
+         // Long runs: does the speed hold once the device is hot?
+         const size_t m = std::min<size_t>(60u, speeds.size() / 2u);
+         if (m > 0u)
+--- a/runtime/ps2xRuntime/src/lib/vu/ps2_vu1_impl.inl
++++ b/runtime/ps2xRuntime/src/lib/vu/ps2_vu1_impl.inl
+@@ -6,6 +6,7 @@
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/ps2_memory.h"
+ #include "ps2_vu1_detail.h"
++#include "ps2_prof.h" // measurement build (M02)
+ 
+ #include <algorithm>
+ #include <bit>
+@@ -2870,6 +2871,7 @@
+ 
+     static VU1_FORCE_INLINE void writeVf(VU1Interpreter &vu, Vu1FastCtx &ctx, uint32_t reg, __m128 raw, __m128 normalized, uint32_t dest)
+     {
++        PS2X_MEAS_BUMP(writeVf); // measurement build
+         storeDest(rawReg(vu, reg), raw, dest);
+         if (dest == 0xFu)
+             _mm_store_ps(ctx.norm[reg], normalized);
+@@ -3007,8 +3009,11 @@
+ 
+     static VU1_FORCE_INLINE void commitStatus(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle)
+     {
++        PS2X_MEAS_BUMP(readEvents); // measurement build
++        const uint32_t measHead = ctx.flagHead;
+         if (ctx.flagHead != ctx.flagTail || vu.m_fdiv.valid)
+             foldStatus(vu, ctx, cycle);
++        PS2X_MEAS_ADD(foldedAtRead, ctx.flagHead - measHead);
+     }
+ 
+     static VU1_FORCE_INLINE void commitClip(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle)
+@@ -3062,6 +3067,7 @@
+         foldStatus(vu, ctx, cycle);
+         if (ctx.flagHead == before)
+             foldStatusSlow(vu, ctx, ctx.flags[ctx.flagHead & Vu1FastCtx::kFlagMask].ready);
++        PS2X_MEAS_ADD(foldedAtOverflow, ctx.flagHead - before); // measurement build
+     }
+ 
+     static VU1_NOINLINE void makeClipRoom(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle)
+@@ -3074,6 +3080,7 @@
+ 
+     static VU1_FORCE_INLINE Vu1FlagRecord &statusPush(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle)
+     {
++        PS2X_MEAS_BUMP(flagPush); // measurement build
+         if (ctx.flagTail - ctx.flagHead == Vu1FastCtx::kFlagCapacity)
+             makeStatusRoom(vu, ctx, cycle);
+         Vu1FlagRecord &record = ctx.flags[ctx.flagTail++ & Vu1FastCtx::kFlagMask];
+@@ -3088,6 +3095,7 @@
+ 
+     static VU1_FORCE_INLINE Vu1FlagRecord &clipPush(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle)
+     {
++        PS2X_MEAS_BUMP(clipPush); // measurement build
+         if (ctx.clipTail - ctx.clipHead == Vu1FastCtx::kClipCapacity)
+             makeClipRoom(vu, ctx, cycle);
+         Vu1FlagRecord &record = ctx.clips[ctx.clipTail++ & Vu1FastCtx::kClipMask];
+@@ -3259,6 +3267,7 @@
+     static VU1_NOINLINE __m128 fmacExact(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle, uint32_t dest, __m128 s, __m128 t, __m128 a,
+                                          __m128 result, __m128 &normalized, FmacFlags &flags)
+     {
++        PS2X_MEAS_BUMP(fmacExact); // measurement build
+         constexpr bool cross = K == FK::Opmsub || K == FK::Opmula;
+         constexpr bool productSum = K == FK::Madd || K == FK::Msub || K == FK::Opmsub;
+         constexpr bool usesAcc = K == FK::Madd || K == FK::Msub || K == FK::Opmsub;
+@@ -3360,6 +3369,7 @@
+     static VU1_FORCE_INLINE __m128 fmac(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle, uint32_t dest, __m128 s, __m128 t, __m128 a,
+                                         __m128 &normalized)
+     {
++        PS2X_MEAS_BUMP(fmacRing); // measurement build
+         FmacFlags flags;
+         const __m128 result = fmacF<K>(vu, ctx, cycle, dest, s, t, a, normalized, flags);
+         if (dest != 0u)
+@@ -3443,6 +3453,7 @@
+     static VU1_FORCE_INLINE __m128 fmacF(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle, uint32_t dest, __m128 s, __m128 t, __m128 a,
+                                          __m128 &normalized, FmacFlags &flags)
+     {
++        PS2X_MEAS_BUMP(fmacF); // measurement build
+         constexpr bool productSum = K == FK::Madd || K == FK::Msub || K == FK::Opmsub;
+         const FmacCore c = fmacCore<K>(dest, s, t, a);
+         if (!c.safe)
+@@ -3471,6 +3482,7 @@
+     static VU1_FORCE_INLINE __m128 fmacV(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle, uint32_t dest, __m128 s, __m128 t, __m128 a,
+                                          __m128 &normalized, __m128 &accZero, __m128 &accSign, uint32_t &accScalar)
+     {
++        PS2X_MEAS_BUMP(fmacV); // measurement build
+         constexpr bool productSum = K == FK::Madd || K == FK::Msub || K == FK::Opmsub;
+         const FmacCore c = fmacCore<K>(dest, s, t, a);
+         if (!c.safe)
+@@ -3537,7 +3549,10 @@
+                 const __m128 absProduct = _mm_and_ps(product, _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF)));
+                 if ((static_cast<uint32_t>(_mm_movemask_ps(_mm_cmpge_ps(absProduct, _mm_set1_ps(std::numeric_limits<float>::max())))) &
+                      kRev4[dest]) != 0u)
++                {
++                    PS2X_MEAS_BUMP(fastFallback); // measurement build
+                     return fmacV<K>(vu, ctx, cycle, dest, s0, t0, a, normalized, accZero, accSign, accScalar);
++                }
+             }
+             if constexpr (K == FK::Mul || K == FK::Opmula)
+                 result = product;
+@@ -3575,6 +3590,7 @@
+     static VU1_FORCE_INLINE __m128 fmacFastV(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle, uint32_t dest, __m128 s, __m128 t,
+                                              __m128 a, __m128 &normalized, __m128 &accZero, __m128 &accSign, uint32_t &accScalar)
+     {
++        PS2X_MEAS_BUMP(fmacFastV); // measurement build
+         return fmacFastImpl<K, true>(vu, ctx, cycle, dest, s, t, a, normalized, accZero, accSign, accScalar);
+     }
+ 
+@@ -3586,6 +3602,7 @@
+     static VU1_FORCE_INLINE __m128 fmacFastN(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle, uint32_t dest, __m128 s, __m128 t,
+                                              __m128 a, __m128 &normalized)
+     {
++        PS2X_MEAS_BUMP(fmacFastN); // measurement build
+         __m128 unusedZero = _mm_setzero_ps(), unusedSign = _mm_setzero_ps();
+         uint32_t unusedScalar = 0u;
+         return fmacFastImpl<K, false>(vu, ctx, cycle, dest, s, t, a, normalized, unusedZero, unusedSign, unusedScalar);
+@@ -3634,6 +3651,7 @@
+ 
+     static VU1_FORCE_INLINE void clipOp(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle, __m128 fsRaw, __m128 ftRaw)
+     {
++        PS2X_MEAS_BUMP(clipOp); // measurement build
+         const uint32_t wBits = static_cast<uint32_t>(_mm_extract_ps(ftRaw, 3));
+         const int32_t limit = (wBits & 0x7F800000u) != 0u ? static_cast<int32_t>(wBits & 0x7FFFFFFFu) : 0x007FFFFF;
+         if (simdClipEnabled())
+@@ -3676,6 +3694,7 @@
+ 
+     static VU1_FORCE_INLINE __m128 ldq(const uint8_t *mem, uint32_t address)
+     {
++        PS2X_MEAS_BUMP(ldq); // measurement build
+         return _mm_loadu_ps(reinterpret_cast<const float *>(mem + address));
+     }
+ 
+@@ -3729,6 +3748,7 @@
+ 
+     static VU1_FORCE_INLINE void stq(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle, uint32_t address, __m128 value, uint32_t dest)
+     {
++        PS2X_MEAS_BUMP(stq); // measurement build
+         xgkickSync(vu, ctx, cycle);
+         storeDest(reinterpret_cast<float *>(ctx.mem + address), value, dest);
+     }
+@@ -3781,6 +3801,7 @@
+ 
+     static VU1_FORCE_INLINE void xgkickStart(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle, int32_t vi)
+     {
++        PS2X_MEAS_BUMP(xgkick); // measurement build
+         vu.m_cycle = cycle;
+         vu.startXgkick(static_cast<uint32_t>(static_cast<uint16_t>(vi)));
+         ctx.xgkickDone = cycle;
+@@ -3788,6 +3809,7 @@
+ 
+     static VU1_FORCE_INLINE void divOp(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle, float numRaw, float denRaw)
+     {
++        PS2X_MEAS_BUMP(divOp); // measurement build
+         syncQ(vu, ctx, cycle);
+         const float num = vu.normalizeOperand(numRaw);
+         const float den = vu.normalizeOperand(denRaw);
+@@ -3953,6 +3975,7 @@
+             }
+         }
+         xgkickSync(vu, ctx, ctx.cycle);
++        PS2X_MEAS_ADD(pendingAtEnd, ctx.flagTail - ctx.flagHead); // measurement build
+         if (result == StepResult::Ended)
+         {
+             constexpr uint64_t kAll = std::numeric_limits<uint64_t>::max() / 2u;
+--- a/runtime/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/runtime/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -393,8 +393,8 @@
+     m_hasPreferredDisplaySource = false;
+     if (m_backend)
+     {
+-        m_backend->Flush();
+-        m_backend->Sync(GSSyncReason::Reset);
++        { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifFlush); m_backend->Flush(); }
++        { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifSync); m_backend->Sync(GSSyncReason::Reset); }
+         m_backend->Reset();
+     }
+     {
+@@ -436,7 +436,7 @@
+     if (!m_backend)
+         return;
+     std::vector<uint8_t> snapshot;
+-    m_backend->Sync(GSSyncReason::DebugReadback);
++    { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifSync); m_backend->Sync(GSSyncReason::DebugReadback); }
+     m_backend->SnapshotVram(snapshot);
+     std::lock_guard<std::mutex> lock(m_snapshotMutex);
+     m_displaySnapshot.swap(snapshot);
+@@ -777,8 +777,8 @@
+         std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
+         if (m_backend)
+         {
+-            m_backend->Flush();
+-            m_backend->Sync(GSSyncReason::Presentation);
++            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifFlush); m_backend->Flush(); }
++            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifSync); m_backend->Sync(GSSyncReason::Presentation); }
+             frame = m_backend->Present(request);
+         }
+     }
+@@ -859,7 +859,12 @@
+ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+ {
+     const ps2x_prof::Scope profScope(ps2x_prof::Gif);
+-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    const ps2x_prof::GifPacketScope gifMeas(sizeBytes); // measurement build (M03)
++    std::unique_lock<std::recursive_mutex> lock(m_stateMutex, std::defer_lock);
++    {
++        const ps2x_prof::GifSubScope gifLock(ps2x_prof::GifLock);
++        lock.lock();
++    }
+     if (!data || sizeBytes < 16 || !m_backend)
+         return;
+ 
+@@ -878,8 +883,8 @@
+     if (!g_gifCont.active && tryProcessNativeImageUploadPacket(data, sizeBytes))
+     {
+         if (m_rawGif)
+-            m_backend->RawGif(data, sizeBytes);
+-        m_backend->Flush();
++            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifOther); m_backend->RawGif(data, sizeBytes); }
++        { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifFlush); m_backend->Flush(); }
+         return;
+     }
+ 
+@@ -939,6 +944,8 @@
+             regPadOdd = ((nloop * nreg) & 1u) != 0u;
+ 
+         recordGifTagDebugEventUnlocked(sizeBytes, nloop, flg, nreg);
++        if (ps2x_prof::gifInside()) // measurement build (M03)
++            ps2x_prof::bump(flg == GIF_FMT_PACKED ? ps2x_prof::g_gif.tagsPacked : flg == 1u ? ps2x_prof::g_gif.tagsReglist : ps2x_prof::g_gif.tagsImage, 1u);
+ 
+         bool pre = ((tagLo >> 46) & 1) != 0;
+         if (pre && !resumed)
+@@ -960,8 +967,8 @@
+                     {
+                         saveGifContinuation(tagLo, tagHi, nloop - loop, r, false);
+                         if (m_rawGif)
+-                            m_backend->RawGif(data, sizeBytes);
+-                        m_backend->Flush();
++                            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifOther); m_backend->RawGif(data, sizeBytes); }
++                        { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifFlush); m_backend->Flush(); }
+                         return;
+                     }
+                     uint64_t lo = loadLE64(data + offset);
+@@ -989,8 +996,8 @@
+                             if (gsSignalLogEnabled())
+                                 gsSignalLog("SIGNAL stalled", hi, m_privRegs->csr.load());
+                             if (offset != 0u)
+-                                m_backend->RawGif(data, offset);
+-                            m_backend->Flush();
++                                { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifOther); m_backend->RawGif(data, offset); }
++                            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifFlush); m_backend->Flush(); }
+                             if (releaseNow)
+                                 ps2xGsReleaseStall();
+                             return;
+@@ -1028,7 +1035,7 @@
+                             std::fprintf(stderr, "[gs-sig2] stall at SIGNAL id=%x mask=%x (deferred %zu bytes, replay=%d)\n",
+                                          static_cast<uint32_t>(lo), static_cast<uint32_t>(lo >> 32), g_stall.queue.front().size(),
+                                          t_stallReplaying ? 1 : 0);
+-                        m_backend->Flush();
++                        { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifFlush); m_backend->Flush(); }
+                         if (releaseNow)
+                             ps2xGsReleaseStall();
+                         return;
+@@ -1048,8 +1055,8 @@
+                     {
+                         saveGifContinuation(tagLo, tagHi, nloop - loop, r, regPadOdd);
+                         if (m_rawGif)
+-                            m_backend->RawGif(data, sizeBytes);
+-                        m_backend->Flush();
++                            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifOther); m_backend->RawGif(data, sizeBytes); }
++                        { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifFlush); m_backend->Flush(); }
+                         return;
+                     }
+                     writeRegisterUnlocked(regs[r], loadLE64(data + offset));
+@@ -1072,8 +1079,8 @@
+         }
+     }
+     if (m_rawGif)
+-        m_backend->RawGif(data, sizeBytes);
+-    m_backend->Flush();
++        { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifOther); m_backend->RawGif(data, sizeBytes); }
++    { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifFlush); m_backend->Flush(); }
+ }
+ 
+ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+@@ -1125,7 +1132,7 @@
+ 
+         return true; });
+ 
+-    m_backend->Flush();
++    { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifFlush); m_backend->Flush(); }
+     if (!processed)
+         return false;
+ 
+@@ -1156,7 +1163,7 @@
+     }
+     uploadImageNativeUnlocked(bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
+     if (m_backend)
+-        m_backend->Flush();
++        { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifFlush); m_backend->Flush(); }
+ }
+ 
+ void GS::uploadImageNativeUnlocked(uint64_t bitbltbuf,
+@@ -1166,6 +1173,7 @@
+                                    const uint8_t *data,
+                                    uint32_t sizeBytes)
+ {
++    const ps2x_prof::GifSubScope gifUpload(ps2x_prof::GifUpload); // measurement build (M03)
+     if (!data || sizeBytes == 0 || !m_backend)
+         return;
+ 
+@@ -1465,6 +1473,7 @@
+ 
+ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+ {
++    if (ps2x_prof::gifInside()) ps2x_prof::bump(ps2x_prof::g_gif.regWrites, 1u); // measurement build (M03)
+     const bool interestingReg =
+         regAddr == GS_REG_PRIM ||
+         regAddr == GS_REG_RGBAQ ||
+@@ -1638,7 +1647,7 @@
+         t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
+         t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
+         if (!m_rawGif)
+-            m_backend->LoadClut(t, m_texclut);
++            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifOther); m_backend->LoadClut(t, m_texclut); }
+         break;
+     }
+     case GS_REG_CLAMP_1:
+@@ -1670,7 +1679,7 @@
+         t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
+         t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
+         if (!m_rawGif)
+-            m_backend->LoadClut(t, m_texclut);
++            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifOther); m_backend->LoadClut(t, m_texclut); }
+         break;
+     }
+     case GS_REG_XYOFFSET_1:
+@@ -1804,7 +1813,7 @@
+             command.trxpos = m_trxpos;
+             command.trxreg = m_trxreg;
+             command.direction = m_trxdir;
+-            m_backend->BeginTransfer(command);
++            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifOther); m_backend->BeginTransfer(command); }
+         }
+         recordTransferDebugEventUnlocked();
+         break;
+@@ -1826,7 +1835,7 @@
+         break;
+     case GS_REG_TEXFLUSH:
+         if (m_backend && !m_rawGif)
+-            m_backend->TextureFlush();
++            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifOther); m_backend->TextureFlush(); }
+         break;
+     case GS_REG_SCANMSK:
+         m_scanmsk = value;
+@@ -1882,8 +1891,8 @@
+             gsSignalLog("SIGNAL", value, m_privRegs->csr.load());
+         if (m_backend)
+         {
+-            m_backend->Flush();
+-            m_backend->Sync(GSSyncReason::Finish);
++            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifFlush); m_backend->Flush(); }
++            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifSync); m_backend->Sync(GSSyncReason::Finish); }
+         }
+         if (m_privRegs)
+             ps2xGsSignal(*m_privRegs, static_cast<uint32_t>(value & 0xFFFFFFFF), static_cast<uint32_t>(value >> 32));
+@@ -1896,8 +1905,8 @@
+             gsSignalLog("FINISH", value, m_privRegs->csr.load());
+         if (m_backend)
+         {
+-            m_backend->Flush();
+-            m_backend->Sync(GSSyncReason::Finish);
++            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifFlush); m_backend->Flush(); }
++            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifSync); m_backend->Sync(GSSyncReason::Finish); }
+         }
+         if (m_privRegs)
+             ps2xGsFinish(*m_privRegs);
+@@ -1909,8 +1918,8 @@
+             gsSignalLog("LABEL", value, m_privRegs->csr.load());
+         if (m_backend)
+         {
+-            m_backend->Flush();
+-            m_backend->Sync(GSSyncReason::Finish);
++            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifFlush); m_backend->Flush(); }
++            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifSync); m_backend->Sync(GSSyncReason::Finish); }
+         }
+         if (m_privRegs)
+         {
+@@ -1951,6 +1960,7 @@
+ 
+ void GS::vertexKick(bool drawing)
+ {
++    if (ps2x_prof::gifInside()) ps2x_prof::bump(ps2x_prof::g_gif.kicks, 1u); // measurement build (M03)
+     ++m_vtxCount;
+     ++m_vtxIndex;
+ 
+@@ -2001,11 +2011,11 @@
+     {
+         GSPrimitiveBatch batch = buildDrawBatch(needed);
+         updatePreferredDisplaySourceForDraw(batch);
+-        m_backend->Submit(batch);
++        { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifSubmit); m_backend->Submit(batch); }
+         if (gsTrace().file && gsTrace().lastTick == UINT64_MAX)
+         {
+-            m_backend->Flush();
+-            m_backend->Sync(GSSyncReason::DebugReadback);
++            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifFlush); m_backend->Flush(); }
++            { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifSync); m_backend->Sync(GSSyncReason::DebugReadback); }
+         }
+         if (std::FILE *trace = gsTraceFile(m_privRegs, m_localMemoryStorage, m_localMemorySize))
+         {
+@@ -2014,8 +2024,8 @@
+             static const long dumpDraw = std::getenv("PS2X_GS_TRACE_DUMP_DRAW") ? std::atol(std::getenv("PS2X_GS_TRACE_DUMP_DRAW")) : -1;
+             if (static_cast<long>(tracedDraws++) == dumpDraw)
+             {
+-                m_backend->Flush();
+-                m_backend->Sync(GSSyncReason::DebugReadback);
++                { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifFlush); m_backend->Flush(); }
++                { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifSync); m_backend->Sync(GSSyncReason::DebugReadback); }
+                 if (std::FILE *raw = std::fopen((gsTrace().vramPath + ".draw").c_str(), "wb"))
+                 {
+                     std::fwrite(m_localMemoryStorage, 1, m_localMemorySize, raw);
+@@ -2094,8 +2104,8 @@
+     std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
+     if (m_backend)
+     {
+-        m_backend->Flush();
+-        m_backend->Sync(GSSyncReason::Reset);
++        { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifFlush); m_backend->Flush(); }
++        { const ps2x_prof::GifSubScope gifSub(ps2x_prof::GifSync); m_backend->Sync(GSSyncReason::Reset); }
+ 
+         // The external 4 MiB GS allocation is the backend hand-off format.
+         // This keeps hot backend replacement deterministic even when a future
