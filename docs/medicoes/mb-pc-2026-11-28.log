@@ -1,0 +1,27 @@
+== 2026-11-28 01:19:50 UTC
+model name	: Intel(R) Xeon(R) Processor @ 2.30GHz
+4
+0.12 0.14 0.10 1/107 1581
+[mb-env] arch=x86-64 (SSE) compiler=13.3.0 cpu=2 mhz=0 governor= perf=no (cycles estimated from mhz) reps=9 target=300ms model=
+[mb] loop            ns/op=   0.033 (min 0.031 max 0.033, spread 6.0%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=9343411592 | empty loop step (harness floor)
+[mb] budget          ns/op=   0.146 (min 0.142 max 0.165, spread 16.0%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=1173004152 | budget check + ++cyc
+[mb] rmax2           ns/op=   0.545 (min 0.540 max 0.568, spread 5.1%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=542774368 | budget + 2 rmax (VI ready) + ready write
+[mb] rmax_vf         ns/op=   1.299 (min 1.280 max 1.322, spread 3.2%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=231436688 | budget + 8 rmax (VF 4-lane ready) + setReady4
+[mb] instr_vi        ns/op=   0.875 (min 0.866 max 0.884, spread 1.9%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=342510760 | integer lower instruction (budget, rmax, VI write, branch backup)
+[mb] vnorm_thr       ns/op=   0.923 (min 0.916 max 0.968, spread 5.6%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=311353680 | vnorm, independent, memory to memory
+[mb] vnorm_lat       ns/op=   1.830 (min 1.825 max 1.987, spread 8.9%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=164280344 | vnorm, dependent chain
+[mb] writevf         ns/op=   0.524 (min 0.497 max 0.554, spread 10.8%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=591758888 | writeVf with dest blend (raw + norm stores)
+[mb] ldst            ns/op=   0.494 (min 0.487 max 0.506, spread 3.9%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=522744760 | LQ/SQ: qaddr + ldq + storeDest
+[mb] movemask_thr    ns/op=   0.253 (min 0.250 max 0.287, spread 14.6%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=1203161008 | movemask_ps + kRev4, independent
+[mb] movemask_lat    ns/op=   3.994 (min 3.973 max 4.294, spread 8.0%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=75428216 | movemask_ps -> table -> vector, dependent
+[mb] muladd_thr      ns/op=   0.231 (min 0.223 max 0.239, spread 7.1%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=1353412072 | mul_ps + add_ps, 8 independent chains
+[mb] muladd_lat      ns/op=   1.602 (min 1.563 max 1.622, spread 3.7%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=190682000 | mul_ps + add_ps, dependent chain
+[mb] fmaccore        ns/op=   1.917 (min 1.850 max 1.998, spread 7.8%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=155447768 | fmacCore<Madd>: math + safety checks + 1 movemask
+[mb] fmac_fast       ns/op=   4.857 (min 4.838 max 4.992, spread 3.2%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=61994528 | MADD fast path + flags + ring push + writeVf
+[mb] fmac_exact      ns/op=  12.178 (min 11.966 max 13.816, spread 15.2%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=24956040 | MADD exact (double) path + flags + ring push + writeVf
+[mb] pd_core         ns/op=   1.082 (min 1.063 max 1.161, spread 9.0%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=276069288 | double math only: 4 cvtps_pd + 2 mul_pd + 2 cmp + movemask_pd
+[mb] instr_fmac      ns/op=   6.075 (min 6.065 max 6.323, spread 4.2%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=39902864 | full FMAC instruction: budget + VF ready stall + fast MADD + writeVf + setReady4
+[mb] instr_fmac_x10  ns/op=   7.015 (min 7.004 max 7.817, spread 11.6%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=42625360 | the same, 1 in 10 through the exact path
+[mb] instr_fmac_x2   ns/op=  10.309 (min 9.908 max 12.468, spread 24.8%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=26911808 | the same, 1 in 2 through the exact path
+[mb] csr             ns/op=   7.832 (min 7.572 max 7.980, spread 5.2%) cycles/op=   0.00 (est) instr/op=  0.00 ipc=0.00 ops=39559216 | getcsr + setcsr(RZ) + getcsr + setcsr(restore)
+[mb-end] sink=13442176716804022697

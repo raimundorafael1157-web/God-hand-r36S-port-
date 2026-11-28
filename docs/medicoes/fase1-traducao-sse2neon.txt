@@ -1,0 +1,55 @@
+função                         x86   arm  instruções ARM (sem ret)
+p_add_ps                         2     1  fadd
+p_mul_ps                         2     1  fmul
+p_and_ps                         2     1  and
+p_andnot_ps                      2     1  bic
+p_or_ps                          2     1  orr
+p_cmpeq_ps                       2     1  fcmeq
+p_cmpge_ps                       3     1  fcmge
+p_cmplt_ps                       2     1  fcmgt
+p_min_ps                         2     1  fmin
+p_max_ps                         2     1  fmax
+p_movemask_ps                    2     8  adrp ; ldr ; adrp ; ushl ; ldr ; and ; addv ; fmov
+p_movemask_pd                    2     4  ushr ; mov ; fmov ; orr
+p_movemask_epi8                  2     7  ushr ; usra ; usra ; usra ; umov ; umov ; bfi
+p_shuffle_ps_bc                  2     1  dup
+p_shuffle_ps_mix                 2     1  uzp2
+p_shuffle_ps_cross               2     3  ext ; zip1 ; zip2
+p_movehl_ps                      2     1  dup
+p_cvtps_pd                       2     1  fcvtl
+p_add_pd                         2     1  fadd
+p_mul_pd                         2     1  fmul
+p_cmpgt_pd                       3     1  fcmgt
+p_cmplt_pd                       2     1  fcmgt
+p_cmpeq_pd                       2     1  fcmeq
+p_cmpeq_epi32                    2     1  cmeq
+p_cvtss_f32                      1     0  
+p_set1_ps_mem                    3     1  ld1r
+p_loadu_ps                       2     1  ldr
+p_storeu_ps                      2     1  str
+p_extract_ps                     2     1  mov
+p_getcsr                         3    12  stp ; mov ; bl ; ror ; cmp ; b.hi ; adrp ; add ; ldr ; ldp ; mov ; ldp
+p_setcsr                         3     9  ror ; cmp ; b.hi ; adrp ; add ; ldr ; b ; mov ; b
+p_rmax                           4     2  cmp ; csel
+função                         x86   arm  instruções ARM (sem ret)
+t_loopm                         10    10  cbz ; mov ; mov ; add ; add ; cmp ; b.lo ; mov ; mov ; mov
+t_budgetm                       76    42  (42 instruções)
+t_rmax2m                       157   148  (148 instruções)
+t_rmaxvfm                      315   253  (253 instruções)
+t_instr_vim                    191   221  (221 instruções)
+t_vnorm_thrm                   161    94  (94 instruções)
+t_vnorm_latm                   151    65  (65 instruções)
+t_writevfm                      86    70  (70 instruções)
+t_ldstm                         99    81  (81 instruções)
+t_movemask_thrm                 53    78  (78 instruções)
+t_movemask_latm                 58    85  (85 instruções)
+t_muladd_thrm                   50    47  (47 instruções)
+t_muladd_latm                   36    33  (33 instruções)
+t_fmaccorem                    315   224  (224 instruções)
+t_fmac_fastm                   996   934  (934 instruções)
+t_fmac_exactm                  416   378  (378 instruções)
+t_pd_corem                     192   166  (166 instruções)
+t_instr_fmacILj0EEmm          1263  1113  (1113 instruções)
+t_instr_fmacILj10EEmm         1275  1145  (1145 instruções)
+t_instr_fmacILj2EEmm          1275  1145  (1145 instruções)
+t_csrm                         139   149  (149 instruções)
