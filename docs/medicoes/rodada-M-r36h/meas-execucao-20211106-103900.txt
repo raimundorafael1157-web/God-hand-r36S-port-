@@ -1,0 +1,3 @@
+10:39:00 == medição 20211106-103900: ISO '/roms/ps2/God Hand (USA).iso', 240 s por execução, ordem B1 M1 M2 B2 B3 M3 M4 B4, pausa 60 s
+10:39:00 aparelho: Game Console R35S/R36S fix by lxc | 4.4.189
+10:39:00 ERRO: save não encontrado: /home/ark/godhand-teste-run/stage1.state

@@ -1,0 +1,22 @@
+Teste A/B: A = godhand-A (0001-0009), B = godhand-B (0001-0010) | 20211106-112549 | Game Console R35S/R36S fix by lxc
+
+exec pac speed%   fps   fields  Game_ms    GS_ms   IOP_ms   vu1% vuwait% gswait%    ee%  idle% MHz_min/med/max tC_min/med/max   thr   rssMB worstms erros
+B1   B        7   2.0      845   256.06    37.50    86.45   53.6     0.0     0.0   22.8    0.0 1512/1512/1512  59/ 63/ 66     0     120    531     0
+M1   M        5   1.6      681   345.22    40.98    88.90   60.1     0.0     0.0   17.4    0.0 1512/1512/1512  62/ 65/ 69     0     120    663     0
+M2   M        5   1.6      680   346.97    41.22    88.80   60.1     0.0     0.0   17.3    0.0 1512/1512/1512  64/ 67/ 71     0     120    662     0
+B2   B        7   2.0      841   257.60    37.59    87.27   53.4     0.0     0.0   23.0    0.0 1512/1512/1512  65/ 68/ 72     0     119    530     0
+B3   B        7   2.0      842   257.06    37.48    87.33   53.4     0.0     0.0   23.1    0.0 1512/1512/1512  66/ 70/ 73     0     119    539     0
+M3   M        5   1.6      678   348.94    41.28    88.59   60.1     0.0     0.0   17.4    0.0 1512/1512/1512  67/ 70/ 74     0     120    674     0
+M4   M        5   1.6      681   345.25    40.96    88.79   60.1     0.0     0.0   17.3    0.0 1512/1512/1512  66/ 70/ 74     0     120    653     0
+B4   B        7   2.0      844   256.75    37.45    87.17   53.4     0.0     0.0   23.1    0.0 1512/1512/1512  66/ 71/ 75     0     119    537     0
+
+Média por pacote (as estatísticas completas - mediana, desvio, melhor/pior, diferença % - saem do
+tools/ab_report.py no PC, a partir dos mesmos logs):
+         speed%   fps   fields  Game_ms    GS_ms   IOP_ms   vu1% vuwait% gswait%    ee%  idle%
+média B    7.00    2.00  843.00  256.87   37.50   87.06   53.45    0.00    0.00   23.00    0.00   (4 execuções de 300 s)
+
+Colunas: speed% velocidade de emulação (100% = PS2) | fps quadros do jogo por segundo | fields emulados no
+período medido | Game/GS/IOP_ms tempo OCUPADO de CPU por field emulado | vu1% vuwait% gswait% ee% idle%: % do
+tempo de PAREDE da GameThread (vuwait só com PS2X_MTVU=1) | MHz cpu0 mín/méd/máx | tC zona mais quente
+mín/méd/máx | thr segundos com throttling (clock abaixo do teto ou teto caindo) | rssMB memória máx |
+worstms pior intervalo entre quadros | erros linhas de erro no log. A5/B5 (900 s) ficam fora da média.

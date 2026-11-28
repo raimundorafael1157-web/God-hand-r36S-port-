@@ -1,0 +1,26 @@
+10:38:36 == medição 20211106-103836: ISO '/roms/ps2/God Hand (USA).iso', 240 s por execução, ordem B1 M1 M2 B2 B3 M3 M4 B4, pausa 60 s
+10:38:36 aparelho: Game Console R35S/R36S fix by lxc | 4.4.189
+godhand-B: OK
+stage1.state: OK
+10:38:43 SHA-256 (SHA256SUMS): confere
+godhand-M: OK
+10:38:48 SHA-256 (SHA256SUMS-M): confere
+10:38:48 temperatura no início: 53 C
+10:39:48 == execução 1 (B1): godhand-B, 240 s, temperatura antes 48 C
+10:43:49    [bench-summary] seconds=215 speed avg=7% p5=5% | fields/s avg=3.9 | frames/s avg=2.0 p5=2.0 | flips/s avg=0.0  (exit code 124)
+10:44:49 == execução 2 (M1): godhand-M, 240 s, temperatura antes 52 C
+10:48:51    [bench-summary] seconds=215 speed avg=5% p5=3% | fields/s avg=3.2 | frames/s avg=1.6 p5=1.0 | flips/s avg=0.0  (exit code 124)
+10:49:51 == execução 3 (M2): godhand-M, 240 s, temperatura antes 54 C
+10:53:52    [bench-summary] seconds=215 speed avg=5% p5=3% | fields/s avg=3.2 | frames/s avg=1.6 p5=1.0 | flips/s avg=0.0  (exit code 124)
+10:55:02 == execução 4 (B2): godhand-B, 240 s, temperatura antes 56 C
+10:59:03    [bench-summary] seconds=215 speed avg=7% p5=5% | fields/s avg=3.9 | frames/s avg=2.0 p5=2.0 | flips/s avg=0.0  (exit code 124)
+11:00:43 == execução 5 (B3): godhand-B, 240 s, temperatura antes 56 C
+11:04:45    [bench-summary] seconds=215 speed avg=7% p5=5% | fields/s avg=3.9 | frames/s avg=2.0 p5=2.0 | flips/s avg=0.0  (exit code 124)
+11:07:45 == execução 6 (M3): godhand-M, 240 s, temperatura antes 57 C
+11:11:46    [bench-summary] seconds=215 speed avg=5% p5=3% | fields/s avg=3.2 | frames/s avg=1.6 p5=1.0 | flips/s avg=0.0  (exit code 124)
+11:14:46 == execução 7 (M4): godhand-M, 240 s, temperatura antes 58 C
+11:18:47    [bench-summary] seconds=215 speed avg=5% p5=3% | fields/s avg=3.2 | frames/s avg=1.6 p5=1.0 | flips/s avg=0.0  (exit code 124)
+11:21:48 == execução 8 (B4): godhand-B, 240 s, temperatura antes 58 C
+11:25:49    [bench-summary] seconds=215 speed avg=7% p5=5% | fields/s avg=3.9 | frames/s avg=2.0 p5=2.0 | flips/s avg=0.0  (exit code 124)
+11:25:49 == fim; temperatura 71 C
+11:25:49 resumo: meas-resumo-20211106-103836.txt | detalhe: meas-detalhe-20211106-103836.txt
