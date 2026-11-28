@@ -3,19 +3,22 @@
 . "$(cd "$(dirname "$0")" && pwd)/godhand-teste/_comum.sh"
 # godhand-M pode vir em pedaços compactados (godhand-M.gz.part-aa, -ab...), para cartões/adaptadores que caem ao
 # copiar arquivos grandes: junta, descompacta e confere o SHA-256 antes de usar.
-if ls "$PKG"/godhand-M.gz.part-* >/dev/null 2>&1; then
-    if [ ! -f "$PKG/godhand-M" ] || ! (cd "$PKG" && sha256sum -c SHA256SUMS-M >/dev/null 2>&1); then
-        msg "Juntando os pedaços do godhand-M..."
-        cat "$PKG"/godhand-M.gz.part-* | gzip -dc > "$PKG/godhand-M.tmp" && mv "$PKG/godhand-M.tmp" "$PKG/godhand-M"
-        if (cd "$PKG" && sha256sum -c SHA256SUMS-M >/dev/null 2>&1); then
-            msg "godhand-M montado e conferido."
-        else
-            rm -f "$PKG/godhand-M"
-            msg "ERRO: godhand-M montado não confere com SHA256SUMS-M. Copie os pedaços de novo."; sleep 15; exit 1
-        fi
-    fi
-fi
-[ -f "$PKG/godhand-M" ] || { msg "godhand-M não está em ports/godhand-teste/."; sleep 10; exit 1; }
+# O mesmo vale para godhand-B e stage1.state (godhand-B.gz.part-*, stage1.state.gz.part-*).
+ok_sum() { (cd "$PKG" && grep -E "  $1\$" "$2" 2>/dev/null | sha256sum -c - >/dev/null 2>&1); }
+assemble() { # nome, arquivo de SHA-256
+    ls "$PKG"/"$1".gz.part-* >/dev/null 2>&1 || return 0
+    ok_sum "$1" "$2" && return 0
+    msg "Juntando os pedaços de $1..."
+    cat "$PKG"/"$1".gz.part-* | gzip -dc > "$PKG/$1.tmp" && mv "$PKG/$1.tmp" "$PKG/$1"
+    if ok_sum "$1" "$2"; then msg "$1 montado e conferido."
+    else rm -f "$PKG/$1"; msg "ERRO: $1 montado não confere. Copie os pedaços de $1 de novo."; sleep 15; exit 1; fi
+}
+assemble godhand-M SHA256SUMS-M
+assemble godhand-B SHA256SUMS
+assemble stage1.state SHA256SUMS
+for f in godhand-M godhand-B stage1.state SHA256SUMS SHA256SUMS-M; do
+    [ -f "$PKG/$f" ] || { msg "Falta $f em ports/godhand-teste/."; sleep 10; exit 1; }
+done
 prepare_run_dir
 chmod +x "$RUN/godhand-M" 2>/dev/null
 [ "$RUN" = "$PKG" ] || cp "$PKG/godhand-M" "$PKG/SHA256SUMS-M" "$PKG/run_meas.sh" "$RUN/" 2>/dev/null
