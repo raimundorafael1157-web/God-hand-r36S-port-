@@ -71,11 +71,11 @@ else
         LOG=$(ls -t "$DIR"/bench-cpu-"$TAG"-*.log 2>/dev/null | head -1)
         if [ -z "$LOG" ]; then note "   ANOMALIA: sem log para $TAG"; continue; fi
         LOGS="$LOGS $LOG"
-        CODE=$(grep -E "^exit code" "$LOG" | tail -1)
-        SUMLINE=$(grep -E "^\[bench-summary\]" "$LOG" | cut -c1-110)
+        CODE=$(grep -aE "^exit code" "$LOG" | tail -1)
+        SUMLINE=$(grep -aE "^\[bench-summary\]" "$LOG" | cut -c1-110)
         note "   $SUMLINE ($CODE)"
         [ -z "$SUMLINE" ] && note "   ANOMALIA: execução $TAG sem [bench-summary] (travou ou terminou cedo?)"
-        grep -qiE "\[crash\]|fatal|segmentation|ERROR" "$LOG" && note "   ANOMALIA: $TAG tem linhas de erro no log (ver $(basename "$LOG"))"
+        grep -qaE "\[crash\]|[Ff]atal|[Ss]egmentation fault|(^|[^A-Za-z_])ERROR([^A-Za-z_]|$)" "$LOG" && note "   ANOMALIA: $TAG tem linhas de erro no log (ver $(basename "$LOG"))"
     done
     note "== fim; temperatura $(hottest) C"
 fi
@@ -105,7 +105,7 @@ fi
                 r = num($0, " rss="); if (r + 0 > rss) rss = r + 0
                 wv = num($0, " worst="); if (wv + 0 > worst) worst = wv + 0
             }
-            /\[crash\]|[Ff]atal|[Ss]egmentation|ERROR/ { errs++ }
+            /\[crash\]|[Ff]atal|[Ss]egmentation fault|(^|[^A-Za-z_])ERROR([^A-Za-z_]|$)/ { errs++ }
             /^\[bench-summary\]/ { speed = num($0, "speed avg=") }
             /^\[bench-sections\]/ { vu1 = num($0, " vu1="); vw = num($0, " vu-wait="); gw = num($0, " gs-wait="); ee = num($0, " ee="); idle = num($0, " idle=") }
             END {

@@ -36,5 +36,5 @@ if command -v ldd >/dev/null 2>&1 && ldd "$DIR/gles_replay" 2>&1 | grep -q "libg
 fi
 LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" "$DIR/gles_replay" "$GSR" --repeat "$REPEAT" --dump "$DIR" --dump-every 60 >> "$LOG" 2>&1
 echo "exit code $?" >> "$LOG"
-grep -E "gles\]|gles-summary" "$LOG"
+grep -aE "gles\]|gles-summary" "$LOG"
 echo "log: $LOG"

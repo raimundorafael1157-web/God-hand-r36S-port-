@@ -86,5 +86,5 @@ echo "== binary $(basename "$BIN") ($(wc -c < "$BIN") bytes)" >> "$LOG"
 "$BIN" --iso "$ISO" --headless --time-limit "$SECONDS_LIMIT" >> "$LOG" 2>&1
 echo "exit code $?" >> "$LOG"
 { echo "== after"; for z in /sys/class/thermal/thermal_zone*; do echo "$z $(cat $z/temp 2>/dev/null)"; done; } >> "$LOG" 2>&1
-grep -E "^\[bench-summary\]|ERROR|exit code" "$LOG"
+grep -aE "^\[bench-summary\]|(^|[^A-Za-z_])ERROR([^A-Za-z_]|$)|exit code" "$LOG"
 echo "done: $LOG"
